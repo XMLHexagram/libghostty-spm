@@ -1,11 +1,14 @@
 import Cocoa
+import GhosttyTerminal
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private let defaultContentSize = NSSize(width: 720, height: 480)
     private let minimumContentSize = NSSize(width: 480, height: 320)
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_: Notification) {
+        TerminalDebugLog.enable(.standard)
+
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: defaultContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],

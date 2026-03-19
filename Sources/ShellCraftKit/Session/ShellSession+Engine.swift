@@ -22,6 +22,12 @@ actor Engine {
     private var historyIndex = -1
     private var savedInput = ""
     private var pendingResizeRedrawTask: Task<Void, Never>?
+    private var renderedInputRevision: UInt64 = 0
+    private var renderedInputState = TerminalRenderedInputState(
+        totalLineCount: 1,
+        cursorLineOffset: 0,
+        cursorColumn: 1
+    )
     private var terminalSize = InMemoryTerminalViewport(
         columns: 80,
         rows: 20,
@@ -66,10 +72,14 @@ actor Engine {
         redrawInputLine()
 
         pendingResizeRedrawTask?.cancel()
+        let expectedRevision = renderedInputRevision
         pendingResizeRedrawTask = Task { [self] in
             try? await Task.sleep(nanoseconds: 75_000_000)
             guard !Task.isCancelled else { return }
-            redrawInputLineIfViewportStable(size)
+            redrawInputLineIfViewportStable(
+                size,
+                expectedRevision: expectedRevision
+            )
         }
     }
 
@@ -244,9 +254,20 @@ actor Engine {
     // MARK: - Editing
 
     private func insertText(_ text: String) {
+        let previousInput = currentInput
+        let previousCursorPosition = cursorPosition
         let idx = currentInput.index(currentInput.startIndex, offsetBy: cursorPosition)
         currentInput.insert(contentsOf: text, at: idx)
         cursorPosition += text.count
+
+        if applyIncrementalAppendIfPossible(
+            insertedText: text,
+            previousInput: previousInput,
+            previousCursorPosition: previousCursorPosition
+        ) {
+            return
+        }
+
         redrawInputLine()
     }
 
@@ -340,10 +361,21 @@ actor Engine {
             return
         }
 
+        let previousInput = currentInput
+        let previousCursorPosition = cursorPosition
         let idx = currentInput.index(currentInput.startIndex, offsetBy: cursorPosition)
         currentInput.insert(contentsOf: text, at: idx)
         cursorPosition += text.count
         pendingText.removeAll(keepingCapacity: true)
+
+        if applyIncrementalAppendIfPossible(
+            insertedText: text,
+            previousInput: previousInput,
+            previousCursorPosition: previousCursorPosition
+        ) {
+            return
+        }
+
         redrawInputLine()
     }
 
@@ -386,35 +418,130 @@ actor Engine {
 
     private func sendPrompt() {
         send(shell.prompt)
+        renderedInputState = terminalRenderedInputState(
+            promptDisplayWidth: shell.promptDisplayWidth,
+            input: currentInput,
+            cursorPosition: cursorPosition,
+            terminalColumns: Int(terminalSize.columns)
+        )
+        renderedInputRevision &+= 1
     }
 
     private func redrawInputLine() {
-        shellDebugLog(
-            .actions,
-            "shell redraw promptWidth=\(shell.promptDisplayWidth) input=\(shellDebugDescribe(currentInput)) cursorPosition=\(cursorPosition)"
-        )
-        send("\r\u{1B}[2K")
-        send(shell.prompt)
-        send(currentInput)
-        let cursorColumn = terminalCursorColumn(
+        let nextState = terminalRenderedInputState(
             promptDisplayWidth: shell.promptDisplayWidth,
             input: currentInput,
-            cursorPosition: cursorPosition
+            cursorPosition: cursorPosition,
+            terminalColumns: Int(terminalSize.columns)
         )
-        send("\u{1B}[\(cursorColumn)G")
+        let renderedEndState = terminalRenderedInputState(
+            promptDisplayWidth: shell.promptDisplayWidth,
+            input: currentInput,
+            cursorPosition: currentInput.count,
+            terminalColumns: Int(terminalSize.columns)
+        )
+        let linesToClear = max(
+            renderedInputState.totalLineCount,
+            nextState.totalLineCount
+        )
+
+        shellDebugLog(
+            .actions,
+            "shell redraw promptWidth=\(shell.promptDisplayWidth) input=\(shellDebugDescribe(currentInput)) cursorPosition=\(cursorPosition) previousLines=\(renderedInputState.totalLineCount) nextLines=\(nextState.totalLineCount)"
+        )
+
+        moveCursorToRenderedInputStart(renderedInputState)
+        clearRenderedBlock(linesToClear)
+        send(shell.prompt)
+        send(currentInput)
+        moveCursor(
+            from: renderedEndState,
+            to: nextState
+        )
+        renderedInputState = nextState
+        renderedInputRevision &+= 1
     }
 
     private func redrawInputLineIfViewportStable(
-        _ expectedViewport: InMemoryTerminalViewport
+        _ expectedViewport: InMemoryTerminalViewport,
+        expectedRevision: UInt64
     ) {
         guard hasStarted, !isTerminated else { return }
         guard terminalSize == expectedViewport else { return }
+        guard renderedInputRevision == expectedRevision else {
+            shellDebugLog(
+                .actions,
+                "shell redraw settle skipped: revision changed expected=\(expectedRevision) actual=\(renderedInputRevision)"
+            )
+            return
+        }
 
         shellDebugLog(
             .actions,
             "shell redraw settle viewport=\(expectedViewport.columns)x\(expectedViewport.rows) pixels=\(expectedViewport.widthPixels)x\(expectedViewport.heightPixels)"
         )
         redrawInputLine()
+    }
+
+    private func applyIncrementalAppendIfPossible(
+        insertedText: String,
+        previousInput: String,
+        previousCursorPosition: Int
+    ) -> Bool {
+        guard canIncrementallyAppendInput(
+            previousInput: previousInput,
+            previousCursorPosition: previousCursorPosition,
+            insertedText: insertedText
+        ) else {
+            return false
+        }
+
+        let nextState = terminalRenderedInputState(
+            promptDisplayWidth: shell.promptDisplayWidth,
+            input: currentInput,
+            cursorPosition: cursorPosition,
+            terminalColumns: Int(terminalSize.columns)
+        )
+
+        shellDebugLog(
+            .actions,
+            "shell incremental append text=\(shellDebugDescribe(insertedText)) input=\(shellDebugDescribe(currentInput)) cursorPosition=\(cursorPosition)"
+        )
+        send(insertedText)
+        renderedInputState = nextState
+        renderedInputRevision &+= 1
+        return true
+    }
+
+    private func moveCursorToRenderedInputStart(
+        _ state: TerminalRenderedInputState
+    ) {
+        send("\r")
+        guard state.cursorLineOffset > 0 else { return }
+        send("\u{1B}[\(state.cursorLineOffset)A\r")
+    }
+
+    private func clearRenderedBlock(_ count: Int) {
+        guard count > 0 else { return }
+        shellDebugLog(
+            .actions,
+            "shell clear rendered block lines=\(count)"
+        )
+        send("\u{1B}[J")
+    }
+
+    private func moveCursor(
+        from current: TerminalRenderedInputState,
+        to target: TerminalRenderedInputState
+    ) {
+        let rowDelta = current.cursorLineOffset - target.cursorLineOffset
+        if rowDelta > 0 {
+            send("\u{1B}[\(rowDelta)A")
+        } else if rowDelta < 0 {
+            send("\u{1B}[\(-rowDelta)B")
+        }
+
+        send("\u{1B}[\(target.cursorColumn)G")
     }
 
     private func send(_ string: String) {
@@ -435,7 +562,75 @@ func terminalCursorColumn(
     input: String,
     cursorPosition: Int
 ) -> Int {
-    promptDisplayWidth + String(input.prefix(cursorPosition)).terminalDisplayWidth + 1
+    terminalRenderedInputState(
+        promptDisplayWidth: promptDisplayWidth,
+        input: input,
+        cursorPosition: cursorPosition,
+        terminalColumns: .max
+    ).cursorColumn
+}
+
+struct TerminalRenderedInputState: Equatable {
+    let totalLineCount: Int
+    let cursorLineOffset: Int
+    let cursorColumn: Int
+}
+
+func terminalRenderedInputState(
+    promptDisplayWidth: Int,
+    input: String,
+    cursorPosition: Int,
+    terminalColumns: Int
+) -> TerminalRenderedInputState {
+    let columns = max(terminalColumns, 1)
+    let clampedCursorPosition = min(max(cursorPosition, 0), input.count)
+    let totalWidth = promptDisplayWidth + input.terminalDisplayWidth
+    let cursorWidth = promptDisplayWidth
+        + String(input.prefix(clampedCursorPosition)).terminalDisplayWidth
+    let hasTrailingContent = cursorWidth < totalWidth
+
+    let cursorLineOffset: Int
+    let cursorColumn: Int
+
+    if cursorWidth <= 0 {
+        cursorLineOffset = 0
+        cursorColumn = 1
+    } else if cursorWidth % columns == 0, !hasTrailingContent {
+        cursorLineOffset = max((cursorWidth / columns) - 1, 0)
+        cursorColumn = columns
+    } else {
+        cursorLineOffset = cursorWidth / columns
+        cursorColumn = (cursorWidth % columns) + 1
+    }
+
+    return TerminalRenderedInputState(
+        totalLineCount: wrappedTerminalLineCount(
+            displayWidth: totalWidth,
+            terminalColumns: columns
+        ),
+        cursorLineOffset: cursorLineOffset,
+        cursorColumn: cursorColumn
+    )
+}
+
+func wrappedTerminalLineCount(
+    displayWidth: Int,
+    terminalColumns: Int
+) -> Int {
+    let columns = max(terminalColumns, 1)
+    return max(1, (max(displayWidth, 1) - 1) / columns + 1)
+}
+
+func canIncrementallyAppendInput(
+    previousInput: String,
+    previousCursorPosition: Int,
+    insertedText: String
+) -> Bool {
+    guard !insertedText.isEmpty else { return false }
+    guard previousCursorPosition == previousInput.count else { return false }
+    return insertedText.unicodeScalars.allSatisfy { scalar in
+        scalar.value >= 0x20 && scalar.value != 0x7F
+    }
 }
 
 private func shellDebugLog(

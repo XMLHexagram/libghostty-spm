@@ -259,10 +259,8 @@ private final class DisplayLinkTarget: DisplayLinkDelegate, @unchecked Sendable 
     @MainActor var core: TerminalSurfaceCoordinator?
 
     nonisolated func synchronization(context _: DisplayLinkCallbackContext) {
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated {
-                self?.core?.tick()
-            }
+        terminalRunOnMain { [weak self] in
+            self?.core?.tick()
         }
     }
 }

@@ -57,7 +57,6 @@ final class TerminalCallbackBridge {
                 category,
                 "callback action=\(TerminalDebugLog.describe(action.tag))"
             )
-            break
         }
     }
 

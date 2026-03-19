@@ -42,7 +42,7 @@ public enum TerminalDebugLog {
 
     private final class Store: @unchecked Sendable {
         let lock = NSLock()
-        var isEnabled = true
+        var isEnabled = false
         var categories: TerminalDebugCategory = .standard
         var sink: Sink = { message in
             Swift.print(message)

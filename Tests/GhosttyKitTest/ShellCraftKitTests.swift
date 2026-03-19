@@ -49,6 +49,104 @@ struct ShellCraftKitTests {
     }
 
     @Test
+    func renderedInputStateTracksWrappedLinesAndCursorPlacement() {
+        let state = terminalRenderedInputState(
+            promptDisplayWidth: 18,
+            input: "hello world",
+            cursorPosition: 11,
+            terminalColumns: 20
+        )
+
+        #expect(state.totalLineCount == 2)
+        #expect(state.cursorLineOffset == 1)
+        #expect(state.cursorColumn == 10)
+    }
+
+    @Test
+    func renderedInputStateHandlesPromptOnlyWrapping() {
+        let state = terminalRenderedInputState(
+            promptDisplayWidth: 18,
+            input: "",
+            cursorPosition: 0,
+            terminalColumns: 10
+        )
+
+        #expect(state.totalLineCount == 2)
+        #expect(state.cursorLineOffset == 1)
+        #expect(state.cursorColumn == 9)
+    }
+
+    @Test
+    func wrappedTerminalLineCountHandlesExactBoundary() {
+        #expect(wrappedTerminalLineCount(displayWidth: 20, terminalColumns: 20) == 1)
+        #expect(wrappedTerminalLineCount(displayWidth: 21, terminalColumns: 20) == 2)
+    }
+
+    @Test
+    func renderedInputStateKeepsCursorOnBoundaryWithoutTrailingContent() {
+        let state = terminalRenderedInputState(
+            promptDisplayWidth: 18,
+            input: "ab",
+            cursorPosition: 2,
+            terminalColumns: 20
+        )
+
+        #expect(state.totalLineCount == 1)
+        #expect(state.cursorLineOffset == 0)
+        #expect(state.cursorColumn == 20)
+    }
+
+    @Test
+    func renderedInputStateWrapsBoundaryCursorWhenTrailingContentExists() {
+        let state = terminalRenderedInputState(
+            promptDisplayWidth: 18,
+            input: "abc",
+            cursorPosition: 2,
+            terminalColumns: 20
+        )
+
+        #expect(state.totalLineCount == 2)
+        #expect(state.cursorLineOffset == 1)
+        #expect(state.cursorColumn == 1)
+    }
+
+    @Test
+    func incrementalAppendIsAllowedForTailInsertion() {
+        #expect(
+            canIncrementallyAppendInput(
+                previousInput: "hello",
+                previousCursorPosition: 5,
+                insertedText: " world"
+            )
+        )
+        #expect(
+            canIncrementallyAppendInput(
+                previousInput: "ni",
+                previousCursorPosition: 2,
+                insertedText: "你好"
+            )
+        )
+    }
+
+    @Test
+    func incrementalAppendFallsBackForMidLineOrControlInput() {
+        #expect(
+            !canIncrementallyAppendInput(
+                previousInput: "hello",
+                previousCursorPosition: 2,
+                insertedText: "X"
+            )
+        )
+        #expect(
+            !canIncrementallyAppendInput(
+                previousInput: "hello",
+                previousCursorPosition: 5,
+                insertedText: "\t"
+            )
+        )
+    }
+
+    @Test
     func sandboxShellSupportsExitAndStyledFallback() {
         let viewport = InMemoryTerminalViewport(
             columns: 80,

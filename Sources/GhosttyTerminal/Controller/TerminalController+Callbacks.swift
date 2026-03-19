@@ -17,7 +17,7 @@ private enum TerminalCallbacks {
         guard let userdata else { return }
         let controller = Unmanaged<TerminalController>.fromOpaque(userdata)
             .takeUnretainedValue()
-        DispatchQueue.main.async {
+        terminalRunOnMain {
             controller.tick()
         }
     }
@@ -36,7 +36,7 @@ private enum TerminalCallbacks {
         let bridge = Unmanaged<TerminalCallbackBridge>
             .fromOpaque(bridgePtr)
             .takeUnretainedValue()
-        DispatchQueue.main.async {
+        terminalRunOnMain {
             bridge.handleAction(action)
         }
 
@@ -51,7 +51,7 @@ private enum TerminalCallbacks {
         let bridge = Unmanaged<TerminalCallbackBridge>
             .fromOpaque(userdata)
             .takeUnretainedValue()
-        DispatchQueue.main.async {
+        terminalRunOnMain {
             bridge.handleClose(processAlive: processAlive)
         }
     }

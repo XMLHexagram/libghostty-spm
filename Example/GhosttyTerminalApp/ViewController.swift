@@ -2,7 +2,7 @@ import Cocoa
 import GhosttyTerminal
 import ShellCraftKit
 
-class ViewController: NSViewController {
+final class ViewController: NSViewController {
     private lazy var terminalView: TerminalView = .init(
         frame: NSRect(x: 0, y: 0, width: 720, height: 480)
     )
@@ -20,10 +20,26 @@ class ViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        configureView()
+        configureTerminalView()
+    }
 
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        activateTerminal()
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        terminalView.fitToSize()
+    }
+
+    private func configureView() {
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    }
 
+    private func configureTerminalView() {
         terminalView.delegate = self
         terminalView.configuration = TerminalSurfaceOptions(
             backend: .inMemory(shellSession.terminalSession)
@@ -40,15 +56,9 @@ class ViewController: NSViewController {
         ])
     }
 
-    override func viewDidAppear() {
-        super.viewDidAppear()
+    private func activateTerminal() {
         view.window?.makeFirstResponder(terminalView)
         shellSession.start()
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        terminalView.fitToSize()
     }
 }
 

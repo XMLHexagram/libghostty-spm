@@ -2,25 +2,31 @@ import GhosttyTerminal
 import ShellCraftKit
 import UIKit
 
-class ViewController: UIViewController {
+final class ViewController: UIViewController {
     private lazy var terminalView: TerminalView = .init(frame: .zero)
-
     private lazy var shellSession: ShellSession = .init(shell: defaultSandboxShell)
-
     private lazy var controller: TerminalController = .init { builder in
         builder.withBackgroundOpacity(0)
     }
 
-    override func loadView() {
-        view = UIView()
-    }
-
     override func viewDidLoad() {
         super.viewDidLoad()
-
         view.backgroundColor = .systemBackground
         view.isOpaque = true
+        configureTerminalView()
+    }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        activateTerminal()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        terminalView.fitToSize()
+    }
+
+    private func configureTerminalView() {
         terminalView.delegate = self
         terminalView.configuration = TerminalSurfaceOptions(
             backend: .inMemory(shellSession.terminalSession)
@@ -39,15 +45,9 @@ class ViewController: UIViewController {
         ])
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
+    private func activateTerminal() {
         terminalView.becomeFirstResponder()
         shellSession.start()
-    }
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        terminalView.fitToSize()
     }
 }
 
