@@ -13,6 +13,8 @@
         }
 
         func handleInputBarKey(_ key: TerminalInputBarKey) {
+            commitMarkedTextIfStickyModifiersAreActive()
+
             switch key {
             case let .symbol(text):
                 _ = handleStickyTextInput(text)
@@ -47,6 +49,11 @@
                 let mods = stickyModifiers.consumeForNextKey()
                 sendSyntheticKey(usage: 0x51, additionalMods: mods)
             }
+        }
+
+        private func commitMarkedTextIfStickyModifiersAreActive() {
+            guard stickyModifiers.hasActiveModifiers, inputHandler.hasMarkedText else { return }
+            inputHandler.unmarkText(applyingStickyModifiers: false)
         }
 
         private func sendSyntheticKey(
@@ -89,8 +96,50 @@
 
         @discardableResult
         func handleStickyTextInput(_ text: String) -> Bool {
+            handleStickyTextInput(text) { [weak self] text in
+                self?.inputHandler.insertText(text)
+            }
+        }
+
+        @discardableResult
+        func handleStickyCommittedText(_ text: String) -> Bool {
+            handleStickyTextInput(text) { [weak self] text in
+                self?.surface?.sendText(text)
+            }
+        }
+
+        @discardableResult
+        func handleStickyMarkedText(_ text: String) -> Bool {
+            guard stickyModifiers.hasActiveModifiers else { return false }
+
+            let keyText = String(text.prefix(1))
+            guard !keyText.isEmpty else {
+                stickyModifiers.reset()
+                return false
+            }
+
+            let mods = stickyModifiers.consumeForNextKey()
+            let handled: Bool
+            if mods == .ctrl, let controlByte = controlByte(for: keyText) {
+                sendControlByte(controlByte, modifiers: mods)
+                handled = true
+            } else {
+                handled = sendModifiedTextKey(keyText, modifiers: mods)
+            }
+
+            stickyModifiers.reset()
+            return handled
+        }
+
+        @discardableResult
+        private func handleStickyTextInput(
+            _ text: String,
+            fallback: (String) -> Void
+        ) -> Bool {
+            commitMarkedTextIfStickyModifiersAreActive()
+
             guard stickyModifiers.hasActiveModifiers else {
-                inputHandler.insertText(text)
+                fallback(text)
                 return false
             }
 
@@ -104,7 +153,7 @@
                 return true
             }
 
-            inputHandler.insertText(text)
+            fallback(text)
             return false
         }
 

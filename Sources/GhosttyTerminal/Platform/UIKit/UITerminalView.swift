@@ -113,5 +113,11 @@
             TerminalDebugLog.log(.ime, "refresh text geometry reason=\(reason)")
             inputHandler.notifyGeometryDidChange(reason: reason)
         }
+
+        func refreshInputAccessoryContent() {
+            #if !targetEnvironment(macCatalyst)
+                terminalInputAccessory.refreshContent()
+            #endif
+        }
     }
 #endif

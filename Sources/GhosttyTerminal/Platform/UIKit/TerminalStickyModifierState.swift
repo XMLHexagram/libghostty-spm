@@ -53,6 +53,14 @@
             ctrl != .inactive || alt != .inactive || command != .inactive
         }
 
+        func reset() {
+            guard hasActiveModifiers else { return }
+            ctrl = .inactive
+            alt = .inactive
+            command = .inactive
+            onChange?()
+        }
+
         private func nextActivation(
             _ current: Activation,
             lastTap: Date

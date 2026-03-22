@@ -58,6 +58,11 @@
             }
 
             #if !targetEnvironment(macCatalyst)
+                if inputHandler.hasMarkedText {
+                    inputHandler.insertText(text)
+                    return
+                }
+
                 if stickyModifiers.hasActiveModifiers {
                     _ = handleStickyTextInput(text)
                     return
@@ -118,7 +123,7 @@
         }
 
         public func unmarkText() {
-            inputHandler.unmarkText()
+            inputHandler.unmarkText(applyingStickyModifiers: false)
         }
 
         public var markedTextRange: UITextRange? {
@@ -209,6 +214,18 @@
         }
 
         public func replace(_: UITextRange, withText text: String) {
+            #if !targetEnvironment(macCatalyst)
+                if inputHandler.hasMarkedText {
+                    inputHandler.insertText(text)
+                    return
+                }
+
+                if stickyModifiers.hasActiveModifiers {
+                    _ = handleStickyTextInput(text)
+                    return
+                }
+            #endif
+
             inputHandler.insertText(text)
         }
 

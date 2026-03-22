@@ -26,7 +26,10 @@
 
         // MARK: - Text Input
 
-        func insertText(_ text: String) {
+        func insertText(
+            _ text: String,
+            applyingStickyModifiers: Bool = false
+        ) {
             guard let view else { return }
             let shouldNotifySelectionChange = shouldNotifySelectionChange
 
@@ -42,7 +45,12 @@
 
             markedTextState.clear()
             view.surface?.preedit("")
-            view.surface?.sendText(text)
+            if applyingStickyModifiers {
+                _ = view.handleStickyCommittedText(text)
+            } else {
+                view.surface?.sendText(text)
+            }
+            view.refreshInputAccessoryContent()
 
             if shouldNotifySelectionChange {
                 view.inputDelegate?.selectionDidChange(view)
@@ -52,11 +60,34 @@
 
         func setMarkedText(_ text: String?, selectedRange: NSRange) {
             guard let view else { return }
+            let shouldNotifySelectionChange = shouldNotifySelectionChange
 
             TerminalDebugLog.log(
                 .ime,
                 "setMarkedText text=\(TerminalDebugLog.describe(text)) selected=\(TerminalDebugLog.describe(selectedRange))"
             )
+
+            #if !targetEnvironment(macCatalyst)
+                if let text, !text.isEmpty {
+                    if view.stickyModifiers.hasActiveModifiers {
+                        view.inputDelegate?.textWillChange(view)
+                        if shouldNotifySelectionChange {
+                            view.inputDelegate?.selectionWillChange(view)
+                        }
+
+                        markedTextState.clear()
+                        view.surface?.preedit("")
+                        _ = view.handleStickyMarkedText(text)
+                        view.refreshInputAccessoryContent()
+
+                        if shouldNotifySelectionChange {
+                            view.inputDelegate?.selectionDidChange(view)
+                        }
+                        view.inputDelegate?.textDidChange(view)
+                        return
+                    }
+                }
+            #endif
 
             view.inputDelegate?.textWillChange(view)
             view.inputDelegate?.selectionWillChange(view)
@@ -68,12 +99,15 @@
             } else {
                 view.surface?.preedit("")
             }
+            view.refreshInputAccessoryContent()
 
             view.inputDelegate?.selectionDidChange(view)
             view.inputDelegate?.textDidChange(view)
         }
 
-        func unmarkText() {
+        func unmarkText(
+            applyingStickyModifiers: Bool = false
+        ) {
             guard let view else { return }
             let shouldNotifySelectionChange = shouldNotifySelectionChange
             let committedText = markedTextState.text
@@ -89,10 +123,15 @@
             }
 
             markedTextState.clear()
-            if let committedText, !committedText.isEmpty {
-                view.surface?.sendText(committedText)
-            }
             view.surface?.preedit("")
+            if let committedText, !committedText.isEmpty {
+                if applyingStickyModifiers {
+                    _ = view.handleStickyCommittedText(committedText)
+                } else {
+                    view.surface?.sendText(committedText)
+                }
+            }
+            view.refreshInputAccessoryContent()
 
             if shouldNotifySelectionChange {
                 view.inputDelegate?.selectionDidChange(view)
@@ -157,6 +196,7 @@
 
             _ = markedTextState.deleteBackward()
             view.surface?.preedit(markedTextState.text ?? "")
+            view.refreshInputAccessoryContent()
 
             if shouldNotifySelectionChange {
                 view.inputDelegate?.selectionDidChange(view)
