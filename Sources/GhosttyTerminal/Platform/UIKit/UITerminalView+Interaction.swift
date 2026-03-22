@@ -20,7 +20,15 @@
                 }
             #endif
             super.touchesBegan(touches, with: event)
-            becomeFirstResponder()
+            #if targetEnvironment(macCatalyst)
+                becomeFirstResponder()
+            #else
+                if softwareKeyboardVisible {
+                    resignFirstResponder()
+                } else {
+                    becomeFirstResponder()
+                }
+            #endif
         }
 
         override public func touchesMoved(

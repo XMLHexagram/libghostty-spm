@@ -33,6 +33,7 @@
         #if !targetEnvironment(macCatalyst)
             lazy var terminalInputAccessory = TerminalInputAccessoryView(terminalView: self)
             let stickyModifiers = TerminalStickyModifierState()
+            var softwareKeyboardVisible = false
         #endif
 
         #if !targetEnvironment(macCatalyst)
@@ -113,7 +114,36 @@
             }
 
             setupPlatformInput()
+            #if !targetEnvironment(macCatalyst)
+                setupKeyboardObservers()
+            #endif
         }
+
+        #if !targetEnvironment(macCatalyst)
+            func setupKeyboardObservers() {
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(keyboardDidShow),
+                    name: UIResponder.keyboardDidShowNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(keyboardDidHide),
+                    name: UIResponder.keyboardDidHideNotification,
+                    object: nil
+                )
+            }
+
+            @objc func keyboardDidShow(_: Notification) {
+                guard isFirstResponder else { return }
+                softwareKeyboardVisible = true
+            }
+
+            @objc func keyboardDidHide(_: Notification) {
+                softwareKeyboardVisible = false
+            }
+        #endif
 
         func refreshTextInputGeometry(reason: String) {
             guard isFirstResponder || inputHandler.hasMarkedText else { return }
