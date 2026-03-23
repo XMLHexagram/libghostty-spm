@@ -23,11 +23,11 @@
             #if targetEnvironment(macCatalyst)
                 becomeFirstResponder()
             #else
+                pendingKeyboardDismissOnTouchEnd = false
                 touchDidScrollDuringCurrentTouch = false
                 if softwareKeyboardVisible {
                     pendingKeyboardDismissOnTouchEnd = true
                 } else {
-                    pendingKeyboardDismissOnTouchEnd = false
                     becomeFirstResponder()
                 }
             #endif
