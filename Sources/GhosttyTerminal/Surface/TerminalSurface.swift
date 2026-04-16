@@ -22,7 +22,7 @@ public final class TerminalSurface {
         self.surface = surface
     }
 
-    var rawValue: ghostty_surface_t? {
+    public var rawValue: ghostty_surface_t? {
         surface
     }
 

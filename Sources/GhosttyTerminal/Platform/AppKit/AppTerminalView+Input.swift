@@ -10,6 +10,35 @@
     import GhosttyKit
 
     public extension AppTerminalView {
+        /// Intercepts key equivalents to prevent the menu system from
+        /// stealing keys meant for the terminal (Cmd+C for SIGINT, etc.).
+        ///
+        /// Returns `true` for modifier key combos that the terminal should
+        /// handle, preventing the menu bar from consuming them.
+        /// Returns `false` for plain keys (backspace, arrows) — these go
+        /// through normal `keyDown:` dispatch.
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            guard window?.firstResponder === self
+                || window?.firstResponder === inputContext
+            else { return false }
+            guard event.type == .keyDown, surface != nil else { return false }
+
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let hasActionMod = flags.contains(.command)
+                || flags.contains(.control) || flags.contains(.option)
+            guard hasActionMod else { return false }
+
+            // Check if this is a Ghostty keybinding
+            let keyEvent = event.buildKeyInput(action: event.isARepeat
+                ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS)
+            if ghostty_surface_key_is_binding(surface, keyEvent, nil) {
+                inputHandler?.handleKeyDown(with: event)
+                return true
+            }
+
+            return false
+        }
+
         override func keyDown(with event: NSEvent) {
             inputHandler?.handleKeyDown(with: event)
         }
