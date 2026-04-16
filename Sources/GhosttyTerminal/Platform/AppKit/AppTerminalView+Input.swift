@@ -21,7 +21,7 @@
             guard window?.firstResponder === self
                 || window?.firstResponder === inputContext
             else { return false }
-            guard event.type == .keyDown, surface != nil else { return false }
+            guard event.type == .keyDown, let rawSurface = surface?.rawValue else { return false }
 
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let hasActionMod = flags.contains(.command)
@@ -31,7 +31,7 @@
             // Check if this is a Ghostty keybinding
             let keyEvent = event.buildKeyInput(action: event.isARepeat
                 ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS)
-            if ghostty_surface_key_is_binding(surface, keyEvent, nil) {
+            if ghostty_surface_key_is_binding(rawSurface, keyEvent, nil) {
                 inputHandler?.handleKeyDown(with: event)
                 return true
             }
