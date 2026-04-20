@@ -48,4 +48,6 @@ public protocol TerminalSurfacePwdDelegate: TerminalSurfaceViewDelegate {
 @MainActor
 public protocol TerminalSurfaceSearchDelegate: TerminalSurfaceViewDelegate {
     func terminalDidRequestSearch()
+    func terminalDidUpdateSearchTotal(_ total: Int)
+    func terminalDidUpdateSearchSelected(_ selected: Int)
 }
