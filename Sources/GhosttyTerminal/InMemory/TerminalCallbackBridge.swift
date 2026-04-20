@@ -50,6 +50,22 @@ final class TerminalCallbackBridge {
             (delegate as? any TerminalSurfaceBellDelegate)?
                 .terminalDidRingBell()
 
+        case GHOSTTY_ACTION_PWD:
+            if let cStr = action.action.pwd.pwd {
+                let pwd = String(cString: cStr)
+                TerminalDebugLog.log(
+                    .actions,
+                    "callback action=pwd path=\(TerminalDebugLog.describe(pwd))"
+                )
+                (delegate as? any TerminalSurfacePwdDelegate)?
+                    .terminalDidChangePwd(pwd)
+            }
+
+        case GHOSTTY_ACTION_START_SEARCH:
+            TerminalDebugLog.log(.actions, "callback action=start_search")
+            (delegate as? any TerminalSurfaceSearchDelegate)?
+                .terminalDidRequestSearch()
+
         default:
             let category: TerminalDebugCategory =
                 action.tag == GHOSTTY_ACTION_RENDER ? .render : .actions

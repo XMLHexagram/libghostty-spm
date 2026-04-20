@@ -34,6 +34,12 @@
             core.surface
         }
 
+        /// Execute a ghostty binding action (e.g. "copy_to_clipboard", "toggle_split_zoom").
+        @discardableResult
+        public func performAction(_ action: String) -> Bool {
+            core.surface?.performBindingAction(action) ?? false
+        }
+
         override public init(frame: NSRect) {
             super.init(frame: frame)
             commonInit()
@@ -60,6 +66,7 @@
 
             inputHandler = TerminalKeyEventHandler(view: self)
             setupTrackingArea()
+            registerForDraggedTypes([.fileURL])
 
             core.isAttached = { [weak self] in self?.window != nil }
             core.scaleFactor = { [weak self] in
