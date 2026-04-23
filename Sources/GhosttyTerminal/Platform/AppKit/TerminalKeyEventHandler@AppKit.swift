@@ -34,6 +34,13 @@
                 return
             }
 
+            // Track whether we had marked text (IME composition) BEFORE
+            // interpretKeyEvents, because it may clear the marked text
+            // during processing. If it does, we must not send the raw key
+            // to ghostty — otherwise Delete after single-char IME input
+            // would both cancel the composition AND delete a real character.
+            let hadMarkedText = inputMethodHandler?.hasMarkedText == true
+
             inputMethodHandler?.startCollectingText()
             view.interpretKeyEvents([event])
 
@@ -53,6 +60,12 @@
             }
 
             guard inputMethodHandler?.hasMarkedText != true else { return }
+
+            // If we had marked text before but don't now, the key event
+            // (e.g. Delete) was used to clear the composition. Don't
+            // forward it to ghostty as a real terminal input.
+            if hadMarkedText { return }
+
             sendKeyEvent(for: event, action: action, to: surface, includeText: true)
         }
 
