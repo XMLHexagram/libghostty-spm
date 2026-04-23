@@ -100,9 +100,14 @@
             includeText: Bool
         ) {
             var input = event.buildKeyInput(action: action)
+            // Only include text for printable characters (>= 0x20).
+            // Control characters (e.g. \u{19} for Shift+Tab) must NOT be sent
+            // as text — ghostty needs to translate the keycode+mods itself
+            // (e.g. Tab+Shift → ESC[Z).
             guard includeText,
                   let chars = event.filteredCharacters,
-                  !chars.isEmpty
+                  !chars.isEmpty,
+                  let firstByte = chars.utf8.first, firstByte >= 0x20
             else {
                 surface.sendKeyEvent(input)
                 return
