@@ -40,6 +40,18 @@
             core.surface?.performBindingAction(action) ?? false
         }
 
+        /// Pause the display link to stop Metal rendering.
+        /// Call this when the terminal view is hidden/inactive to save CPU.
+        public func pauseRendering() {
+            core.stopDisplayLink()
+        }
+
+        /// Resume the display link to restart Metal rendering.
+        /// Call this when the terminal view becomes visible/active.
+        public func resumeRendering() {
+            core.startDisplayLink()
+        }
+
         override public init(frame: NSRect) {
             super.init(frame: frame)
             commonInit()
