@@ -21,12 +21,23 @@
             guard window?.firstResponder === self
                 || window?.firstResponder === inputContext
             else { return false }
-            guard event.type == .keyDown, let rawSurface = surface?.rawValue else { return false }
+            guard event.type == .keyDown else { return false }
+
+            // Intercept Tab (0x30) to prevent SwiftUI's focus navigation system
+            // from stealing Tab/Shift+Tab. The terminal needs these for shell
+            // completion, backtab, etc. Without this, NavigationSplitView
+            // consumes Shift+Tab for focus cycling between sidebar and detail.
+            if event.keyCode == 0x30 {
+                inputHandler?.handleKeyDown(with: event)
+                return true
+            }
 
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let hasActionMod = flags.contains(.command)
                 || flags.contains(.control) || flags.contains(.option)
             guard hasActionMod else { return false }
+
+            guard let rawSurface = surface?.rawValue else { return false }
 
             // Check if this is a Ghostty keybinding
             let keyEvent = event.buildKeyInput(action: event.isARepeat
