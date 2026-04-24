@@ -42,7 +42,7 @@ public final class TerminalSurface {
         return result
     }
 
-    func sendText(_ text: String) {
+    public func sendText(_ text: String) {
         guard let s = surface else {
             TerminalDebugLog.log(.input, "surface text ignored: missing surface")
             return
@@ -213,7 +213,7 @@ public final class TerminalSurface {
 
     // MARK: - Mouse Capture
 
-    var isMouseCaptured: Bool {
+    public var isMouseCaptured: Bool {
         guard let s = surface else { return false }
         return ghostty_surface_mouse_captured(s)
     }
