@@ -8,6 +8,12 @@
 import Foundation
 import GhosttyKit
 
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 /// Dispatches C runtime callbacks to a ``TerminalSurfaceViewDelegate``.
 ///
 /// An instance of this class is passed as the `userdata` pointer in the
