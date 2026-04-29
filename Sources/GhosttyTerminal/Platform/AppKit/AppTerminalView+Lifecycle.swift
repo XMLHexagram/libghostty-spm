@@ -88,11 +88,6 @@
             core.synchronizeMetrics()
         }
 
-        override func layout() {
-            super.layout()
-            core.synchronizeMetrics()
-        }
-
         override func viewDidChangeBackingProperties() {
             super.viewDidChangeBackingProperties()
             updateMetalLayerMetrics()
