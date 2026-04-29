@@ -52,6 +52,12 @@
             core.startDisplayLink()
         }
 
+        /// Notify the terminal that its view size has changed.
+        /// Updates the PTY window size so programs (including zmx) receive SIGWINCH.
+        public func notifySizeChanged() {
+            core.synchronizeMetrics()
+        }
+
         override public init(frame: NSRect) {
             super.init(frame: frame)
             commonInit()
@@ -106,6 +112,23 @@
             core.onPostRender = { [weak self] in
                 self?.enforceMetalLayerScale()
             }
+        }
+
+        override public func layout() {
+            super.layout()
+            // Notify ghostty of the new size so it can update the PTY window size
+            // and reflow terminal content. Called after layout is complete so
+            // bounds reflects the final size.
+            let size = bounds.size
+            guard size.width > 0, size.height > 0 else { return }
+            if let metalLayer {
+                let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+                metalLayer.drawableSize = CGSize(
+                    width: size.width * scale,
+                    height: size.height * scale
+                )
+            }
+            core.synchronizeMetrics()
         }
 
         deinit {

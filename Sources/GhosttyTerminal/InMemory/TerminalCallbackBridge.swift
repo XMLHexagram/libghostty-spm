@@ -79,6 +79,25 @@ final class TerminalCallbackBridge {
             (delegate as? any TerminalSurfaceSearchDelegate)?
                 .terminalDidUpdateSearchSelected(Int(selected))
 
+        case GHOSTTY_ACTION_OPEN_URL:
+            let openURL = action.action.open_url
+            if let cStr = openURL.url {
+                let urlString = openURL.len > 0
+                    ? String(bytes: UnsafeBufferPointer(start: UnsafePointer<UInt8>(OpaquePointer(cStr)), count: Int(openURL.len)), encoding: .utf8) ?? String(cString: cStr)
+                    : String(cString: cStr)
+                TerminalDebugLog.log(
+                    .actions,
+                    "callback action=open_url url=\(TerminalDebugLog.describe(urlString))"
+                )
+                if let url = URL(string: urlString) {
+                    #if canImport(AppKit)
+                    NSWorkspace.shared.open(url)
+                    #elseif canImport(UIKit)
+                    UIApplication.shared.open(url)
+                    #endif
+                }
+            }
+
         default:
             let category: TerminalDebugCategory =
                 action.tag == GHOSTTY_ACTION_RENDER ? .render : .actions
