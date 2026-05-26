@@ -211,6 +211,16 @@ public final class TerminalSurface {
         return (x, y, w, h)
     }
 
+    // MARK: - Selection
+
+    /// Whether the surface currently has a non-empty text selection.
+    /// Used by hosting apps to enable/disable the Copy menu item via
+    /// `NSMenuItemValidation`.
+    public var hasSelection: Bool {
+        guard let s = surface else { return false }
+        return ghostty_surface_has_selection(s)
+    }
+
     // MARK: - Mouse Capture
 
     public var isMouseCaptured: Bool {
