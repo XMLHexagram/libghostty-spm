@@ -226,7 +226,24 @@ final class TerminalSurfaceCoordinator {
     }
 
     deinit {
-        displayLink = nil
+        // Surface lifetime is now bound to the coordinator (and therefore
+        // to the owning NSView) — not to window attachment. Tear it down
+        // here so the surface lives exactly as long as the NSView, the
+        // same shape as the upstream ghostty Mac app. Without this, the
+        // surface (and its C-side allocations) would leak on view dealloc
+        // now that `viewDidMoveToWindow(nil)` no longer calls freeSurface.
+        //
+        // `deinit` is `nonisolated` even on `@MainActor` classes, so we
+        // can't call the actor-isolated `tearDownSurface(...)` directly.
+        // Inline the teardown here using `nonisolated(unsafe)` accesses —
+        // surface and bridge are accessed only from the main thread under
+        // normal operation, and a deinit on a main-actor class with no
+        // outstanding Tasks is itself main-thread-bound in practice.
+        TerminalDebugLog.log(.lifecycle, "coordinator deinit — tearing down surface")
+        MainActor.assumeIsolated {
+            tearDownSurface(removingBridgeFrom: controller)
+            displayLink = nil
+        }
     }
 
     private func tearDownSurface(removingBridgeFrom controller: TerminalController?) {

@@ -50,7 +50,15 @@
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             if window != nil {
-                core.rebuildIfReady()
+                // If a surface already exists (we were detached then
+                // re-attached, e.g. SwiftUI tree restructure for a split
+                // pane) skip the rebuild — it would tear down the live
+                // surface and create a fresh one, losing scrollback,
+                // cursor, and any in-progress command. Only build the
+                // surface on first attachment.
+                if core.surface == nil {
+                    core.rebuildIfReady()
+                }
                 updateColorScheme()
                 core.startDisplayLink()
 
@@ -67,8 +75,19 @@
                     object: window
                 )
             } else {
+                // View was removed from its window. Stop the display link
+                // (no point rendering into a void) but DON'T free the
+                // surface — the same NSView is often reattached moments
+                // later when SwiftUI re-shapes its host tree (e.g. a
+                // sibling pane splits or closes, restructuring the
+                // recursive split-tree view hierarchy). Freeing here
+                // would destroy scrollback / cursor / current command
+                // for every survivor of an unrelated pane operation —
+                // exactly the behavior the upstream ghostty Mac app
+                // avoids by tying surface lifetime to the NSView (deinit)
+                // rather than to window attachment. The surface is freed
+                // when the coordinator deinits (see TerminalSurfaceCoordinator).
                 core.stopDisplayLink()
-                core.freeSurface()
                 NotificationCenter.default.removeObserver(self)
             }
         }
