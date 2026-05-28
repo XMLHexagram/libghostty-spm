@@ -45,12 +45,8 @@ let package = Package(
         ),
         .binaryTarget(
             name: "libghostty",
-            // Mirror of upstream Lakr233's storage.1.0.1773686495.
-            // Upstream deleted that tag during its 1.2.x release re-org,
-            // breaking SwiftPM resolution for forks pinned to revisions
-            // earlier than upstream main. We re-uploaded the exact same
-            // xcframework to this fork's own releases so the source +
-            // binary stay ABI-matched.
+            // See Package.swift — upstream deleted storage.1.0.* tag during
+            // 1.2.x release re-org; mirrored to this fork's own releases.
             url: "https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.0.0/GhosttyKit.xcframework.zip",
             checksum: "a07cf3d4eff3fc03b15b23ed8c0ff750a841eb7bcd3d392ca1903254601cfc6d"
         ),
