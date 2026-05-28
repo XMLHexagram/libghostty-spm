@@ -33,6 +33,17 @@ extension TerminalController {
         for bridge in retainedBridges {
             guard let surface = bridge.rawSurface else { continue }
             ghostty_surface_update_config(surface, nextConfig)
+            // Theme / palette / background changes don't dirty the cell
+            // grid the way text writes do — ghostty accepts the new
+            // config but its Metal renderer can sit on the previously
+            // submitted frame until the next external draw request,
+            // making live config updates look like they "didn't apply"
+            // (you have to scroll or type for the colors to flip).
+            // Forcing a refresh per surface schedules a redraw with the
+            // new config immediately. Cheap (single CADisplayLink-style
+            // tick), and it's the same call sites use after any other
+            // config change anyway.
+            ghostty_surface_refresh(surface)
         }
 
         applyPreparedConfig(prepared, source: source)
