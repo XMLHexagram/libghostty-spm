@@ -104,6 +104,29 @@ final class TerminalCallbackBridge {
                 }
             }
 
+        case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
+            let note = action.action.desktop_notification
+            let title = note.title.map { String(cString: $0) } ?? ""
+            let body = note.body.map { String(cString: $0) } ?? ""
+            TerminalDebugLog.log(
+                .actions,
+                "callback action=desktop_notification title=\(TerminalDebugLog.describe(title))"
+            )
+            (delegate as? any TerminalSurfaceDesktopNotificationDelegate)?
+                .terminalDidRequestDesktopNotification(title: title, body: body)
+
+        case GHOSTTY_ACTION_COMMAND_FINISHED:
+            let finished = action.action.command_finished
+            TerminalDebugLog.log(
+                .actions,
+                "callback action=command_finished exit=\(finished.exit_code) duration=\(finished.duration)"
+            )
+            (delegate as? any TerminalSurfaceCommandFinishedDelegate)?
+                .terminalDidFinishCommand(
+                    exitCode: Int(finished.exit_code),
+                    durationNanoseconds: finished.duration
+                )
+
         default:
             let category: TerminalDebugCategory =
                 action.tag == GHOSTTY_ACTION_RENDER ? .render : .actions

@@ -51,3 +51,16 @@ public protocol TerminalSurfaceSearchDelegate: TerminalSurfaceViewDelegate {
     func terminalDidUpdateSearchTotal(_ total: Int)
     func terminalDidUpdateSearchSelected(_ selected: Int)
 }
+
+/// A shell-integration command finished (OSC 133;D). `durationNanoseconds` is
+/// how long the command ran, so hosts can ignore trivially short commands.
+@MainActor
+public protocol TerminalSurfaceCommandFinishedDelegate: TerminalSurfaceViewDelegate {
+    func terminalDidFinishCommand(exitCode: Int, durationNanoseconds: UInt64)
+}
+
+/// A program requested a desktop notification (OSC 9 / OSC 777).
+@MainActor
+public protocol TerminalSurfaceDesktopNotificationDelegate: TerminalSurfaceViewDelegate {
+    func terminalDidRequestDesktopNotification(title: String, body: String)
+}

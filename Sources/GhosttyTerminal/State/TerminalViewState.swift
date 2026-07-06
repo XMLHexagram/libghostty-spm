@@ -17,6 +17,10 @@ public final class TerminalViewState {
 
     public var configuration: TerminalSurfaceOptions = .init()
     public var onClose: ((Bool) -> Void)?
+    /// OSC 133;D — a shell command finished (exit code + how long it ran, in ns).
+    public var onCommandFinished: ((_ exitCode: Int, _ durationNanoseconds: UInt64) -> Void)?
+    /// OSC 9 / OSC 777 — a program requested a desktop notification.
+    public var onDesktopNotification: ((_ title: String, _ body: String) -> Void)?
     public internal(set) var controller: TerminalController
 
     public convenience init() {
