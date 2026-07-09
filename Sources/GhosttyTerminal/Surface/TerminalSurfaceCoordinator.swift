@@ -64,6 +64,29 @@ final class TerminalSurfaceCoordinator {
 
     private var lastMetrics: TerminalViewportMetrics?
 
+    // MARK: - Off-main rendering
+
+    /// Dedicated serial queue that owns `ghostty_surface_draw` for THIS
+    /// surface. On macOS every surface's display-link tick is marshalled to
+    /// the main thread, so with N live surfaces the main thread runs N
+    /// synchronous Metal draws per frame — and a single draw that blocks in
+    /// `nextDrawable`/`waitUntilCompleted` (drawable/IOSurface starvation once
+    /// many surfaces are live) freezes the whole UI. Moving the draw off-main
+    /// means a blocked GPU submit stalls only this surface's render queue, not
+    /// the main thread. Mirrors the official Ghostty app's per-surface render
+    /// thread (input/resize on main, draw on its own thread; libghostty locks
+    /// the two internally).
+    private let renderQueue = DispatchQueue(
+        label: "dev.boite.terminal.surface.render",
+        qos: .userInteractive
+    )
+    /// True while a draw dispatched to `renderQueue` has not yet completed.
+    /// The display link fires every frame; if the previous frame's draw is
+    /// still in flight (slow GPU) we DROP this frame instead of enqueuing,
+    /// bounding the backlog to at most one in-flight draw and letting a slow
+    /// surface simply render at a lower rate rather than accumulate work.
+    private var drawInFlight = false
+
     // MARK: - Display Link
 
     private var displayLink: DisplayLink?
@@ -203,10 +226,40 @@ final class TerminalSurfaceCoordinator {
 
     func tick() {
         TerminalDebugLog.log(.render, "tick")
+        // App + surface bookkeeping stays on the main actor: `ghostty_app_tick`
+        // drains the process-wide app mailbox (shared across ALL surfaces) and
+        // `refresh` is a cheap dirty-state update. Only the expensive,
+        // possibly GPU-blocking `ghostty_surface_draw` is dispatched off-main.
         controller?.tick()
         surface?.refresh()
-        surface?.draw()
-        onPostRender?()
+
+        // Drop this frame if the previous draw is still running — never let
+        // draws pile up on the render queue.
+        guard !drawInFlight, let raw = surface?.rawValue else { return }
+        drawInFlight = true
+        let handle = RawSurfaceHandle(surface: raw)
+        renderQueue.async { [weak self] in
+            // `ghostty_surface_draw` is a plain C entry point safe to call off
+            // the main thread; the surface pointer stays valid because
+            // teardown drains this queue before `ghostty_surface_free`.
+            //
+            // Wrap in an autorelease pool: the draw allocates autoreleased
+            // Metal objects (drawables, command buffers). On the main thread
+            // the run loop drains these each frame; a bare GCD serial queue
+            // does not drain per block, so without this the objects pile up.
+            // (The main-thread path did this too — see MSDisplayLink's
+            // `displayLinkCallback`.)
+            autoreleasepool {
+                ghostty_surface_draw(handle.surface)
+            }
+            terminalRunOnMain { [weak self] in
+                guard let self else { return }
+                // Layer geometry correction (contentsScale/frame) is
+                // CoreAnimation state — back on the main actor after the draw.
+                self.onPostRender?()
+                self.drawInFlight = false
+            }
+        }
     }
 
     // MARK: - Focus
@@ -216,6 +269,18 @@ final class TerminalSurfaceCoordinator {
         surface?.setFocus(focused)
         (delegate as? any TerminalSurfaceFocusDelegate)?
             .terminalDidChangeFocus(focused)
+    }
+
+    // MARK: - Occlusion
+
+    /// Tell ghostty whether this surface is visible. An occluded
+    /// (`visible == false`) surface skips drawing in ghostty's OWN
+    /// renderer thread — so a live-but-hidden surface that still receives
+    /// PTY output (a build, a server, an agent) doesn't keep rendering.
+    /// Pair with `stopDisplayLink()` (which stops the embedder-driven draw)
+    /// to fully quiesce a hidden surface. Mirrors ghostty's occlusion model.
+    func setOcclusion(_ visible: Bool) {
+        surface?.setOcclusion(visible)
     }
 
     // MARK: - Cleanup
@@ -251,6 +316,13 @@ final class TerminalSurfaceCoordinator {
         configuration.inMemorySession?.setSurface(nil)
         bridge.rawSurface = nil
         surface?.setFocus(false)
+        // Barrier: wait for any in-flight off-main draw to finish before we
+        // free the surface, so `ghostty_surface_draw` can never touch a
+        // pointer that `ghostty_surface_free` has already released (the
+        // Ghostty teardown use-after-free). At most one draw is ever in
+        // flight (see `drawInFlight`), so this waits one frame at most.
+        if surface != nil { renderQueue.sync {} }
+        drawInFlight = false
         surface?.free()
         surface = nil
         lastMetrics = nil
@@ -265,6 +337,17 @@ final class TerminalSurfaceCoordinator {
         synchronizeMetrics()
         onCellSizeDidChange?()
     }
+}
+
+// MARK: - RawSurfaceHandle
+
+/// Carries a raw `ghostty_surface_t` (a `void*`, non-`Sendable`) across the
+/// main → render-queue boundary. The unchecked hand-off is sound because the
+/// surface's lifetime is fenced: teardown drains `renderQueue` before
+/// `ghostty_surface_free`, so the pointer is always valid for the duration of
+/// the off-main `ghostty_surface_draw`.
+private struct RawSurfaceHandle: @unchecked Sendable {
+    let surface: ghostty_surface_t
 }
 
 // MARK: - DisplayLinkTarget

@@ -40,15 +40,22 @@
             core.surface?.performBindingAction(action) ?? false
         }
 
-        /// Pause the display link to stop Metal rendering.
-        /// Call this when the terminal view is hidden/inactive to save CPU.
+        /// Pause rendering for a hidden/inactive surface. Stops BOTH draw
+        /// drivers: the embedder-driven display link AND ghostty's own
+        /// renderer thread (via occlusion). Without the occlusion half, a
+        /// hidden surface that keeps getting PTY output (a build, a server,
+        /// an agent) would keep rendering on its own thread. Live-but-hidden
+        /// surfaces keep their PTY + grid; they just stop drawing — so many
+        /// boites can stay live without N surfaces all hammering the GPU.
         public func pauseRendering() {
             core.stopDisplayLink()
+            core.setOcclusion(false)
         }
 
-        /// Resume the display link to restart Metal rendering.
-        /// Call this when the terminal view becomes visible/active.
+        /// Resume rendering when the surface becomes visible/active. Marks it
+        /// visible to ghostty again, then restarts the display link.
         public func resumeRendering() {
+            core.setOcclusion(true)
             core.startDisplayLink()
         }
 
