@@ -47,6 +47,45 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
         ))
     }
 
+    /// Force a reattached full-screen TUI (Claude Code / vim / htop / …) to
+    /// repaint by nudging ONLY the child's reported viewport — one row down,
+    /// then back — without touching ghostty's display grid.
+    ///
+    /// On reattach the surface is recreated at the SAME size the session
+    /// already had, so no resize *delta* ever reaches the child: both dedup
+    /// guards (this session's `lastResize` and the coordinator's `lastMetrics`)
+    /// swallow an identical re-send. Ink-style TUIs only repaint on input or a
+    /// genuine SIGWINCH delta, so the reattached frame stays stale — and worse,
+    /// at the child's stale size — until the user types AND resizes by hand.
+    ///
+    /// Two winsize deltas the child cannot dedup (rows-1, then the true rows)
+    /// deliver two real SIGWINCHes → a clean redraw at the correct size. Ghostty's
+    /// grid is untouched, so there is no visible reflow of the pane; only the
+    /// child re-emits. Restore is deferred a tick so the child observes two
+    /// distinct winsizes rather than one coalesced set. No-op until a first
+    /// real viewport has been dispatched (nothing to nudge from yet).
+    public func nudgeChildViewportToForceRedraw() {
+        lock.lock()
+        guard let base = lastResize, base.rows > 1 else {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        let shrunk = InMemoryTerminalViewport(
+            columns: base.columns,
+            rows: base.rows - 1,
+            widthPixels: base.widthPixels,
+            heightPixels: base.heightPixels,
+            cellWidthPixels: base.cellWidthPixels,
+            cellHeightPixels: base.cellHeightPixels
+        )
+        dispatchResize(shrunk)
+        DispatchQueue.main.async { [weak self] in
+            self?.dispatchResize(base)
+        }
+    }
+
     // MARK: - Receiving Data
 
     /// Feed data into the terminal from the host backend.
