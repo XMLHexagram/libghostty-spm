@@ -15,6 +15,25 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
     private let writeHandler: @Sendable (Data) -> Void
     private let resizeHandler: @Sendable (InMemoryTerminalViewport) -> Void
 
+    /// Bytes that arrived while `surface == nil`. When the surface is (re)built
+    /// we flush these in order instead of having dropped them — the fix for the
+    /// "blank pane after resume" bug, where zmx's reattach re-emit races ahead of
+    /// the surface being (re)attached (proven: with the surface-attach artificially
+    /// delayed, dropping → permanent blank pane, buffering → clean recovery).
+    /// Bounded by `pendingCap`: past the cap we stop buffering and mark
+    /// `pendingOverflowed`, so a long-detached, output-spewing boite (surface freed
+    /// while hidden) can't grow this without limit — those fall back to the reattach
+    /// nudge / a fresh re-emit.
+    private var pendingWhileDetached = Data()
+    private var pendingOverflowed = false
+    private static let pendingCap = 4 * 1024 * 1024  // 4 MB
+
+    /// Buffer-on-nil-surface fix. On by default; kill-switch (reverts to the old
+    /// silent drop) via
+    ///   defaults write uint8.dev.boite.app BoiteTermDisableNilBuffer -bool YES
+    private static let bufferWhileDetached =
+        !UserDefaults.standard.bool(forKey: "BoiteTermDisableNilBuffer")
+
     public init(
         write: @escaping @Sendable (Data) -> Void,
         resize: @escaping @Sendable (InMemoryTerminalViewport) -> Void
@@ -29,6 +48,31 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         self.surface = surface
+
+        // Flush whatever queued up while detached — unless we overflowed the
+        // cap (a truncated stream would replay a partial frame, so skip it and
+        // let the nudge / re-emit repaint instead).
+        if surface != nil, !pendingWhileDetached.isEmpty {
+            if pendingOverflowed {
+                TerminalDebugLog.log(
+                    .lifecycle,
+                    "in-memory session dropped \(pendingWhileDetached.count) buffered bytes (overflowed)"
+                )
+            } else {
+                pendingWhileDetached.withUnsafeBytes { buffer in
+                    if let ptr = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                        ghostty_surface_write_buffer(surface, ptr, UInt(buffer.count))
+                    }
+                }
+                TerminalDebugLog.log(
+                    .lifecycle,
+                    "in-memory session flushed \(pendingWhileDetached.count) buffered bytes"
+                )
+            }
+            pendingWhileDetached.removeAll(keepingCapacity: false)
+            pendingOverflowed = false
+        }
+
         TerminalDebugLog.log(
             .lifecycle,
             "in-memory session surface=\(surface == nil ? "nil" : "set")"
@@ -93,9 +137,27 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let surface else {
+            guard Self.bufferWhileDetached else {
+                TerminalDebugLog.log(
+                    .output,
+                    "terminal <- host dropped \(TerminalDebugLog.describe(data))"
+                )
+                return
+            }
+            if pendingOverflowed { return }
+            if pendingWhileDetached.count + data.count > Self.pendingCap {
+                pendingOverflowed = true
+                pendingWhileDetached.removeAll(keepingCapacity: false)
+                TerminalDebugLog.log(
+                    .output,
+                    "terminal <- host buffer overflow at cap=\(Self.pendingCap); dropping until reattach"
+                )
+                return
+            }
+            pendingWhileDetached.append(data)
             TerminalDebugLog.log(
                 .output,
-                "terminal <- host dropped \(TerminalDebugLog.describe(data))"
+                "terminal <- host buffered \(TerminalDebugLog.describe(data)) pending=\(pendingWhileDetached.count)"
             )
             return
         }
