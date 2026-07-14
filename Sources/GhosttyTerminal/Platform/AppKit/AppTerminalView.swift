@@ -62,13 +62,22 @@
         /// and re-enters a window; an occluded-then-revealed view never moves,
         /// so without this it would come back to a `nil` surface (blank, dead)
         /// until an unrelated view remount rebuilt it.
-        public func resumeRendering() {
-            if core.surface == nil {
+        ///
+        /// Returns `true` iff a freed surface was actually rebuilt here. A
+        /// rebuild is a *restore* — for exec the old surface's `zmx attach` was
+        /// SIGHUP'd on free and a brand-new one is spawned on rebuild, so the
+        /// caller must run the same reattach-repaint nudge a cold restore does
+        /// (a reattached full-screen TUI won't repaint without a SIGWINCH).
+        @discardableResult
+        public func resumeRendering() -> Bool {
+            let rebuilt = core.surface == nil
+            if rebuilt {
                 core.rebuildIfReady()
                 updateColorScheme()
             }
             core.setOcclusion(true)
             core.startDisplayLink()
+            return rebuilt
         }
 
         /// Efficiency-mode freeze for a VISIBLE-but-unfocused split pane —
@@ -126,13 +135,22 @@
         /// to repaint after a persisted restore / surface rebuild. Reattach
         /// recreates the surface at the same size, so no resize delta reaches the
         /// child and the frame comes back stale until the user types AND resizes
-        /// by hand. This nudges the child's viewport one row and back — two real
-        /// SIGWINCHes — without touching ghostty's display grid (no visible
-        /// reflow). No-op for `.exec` backends (no in-memory session; a fresh
-        /// shell paints its own prompt). See
-        /// `InMemoryTerminalSession.nudgeChildViewportToForceRedraw`.
+        /// by hand.
+        ///
+        /// Host-managed panes nudge the child's viewport one row and back — two
+        /// real SIGWINCHes — without touching ghostty's display grid (no visible
+        /// reflow). Exec panes (ghostty owns the PTY; no in-memory session) have
+        /// no such decoupled lever, so they nudge ghostty's surface size instead.
+        /// Both end up delivering the child a genuine winsize delta so a
+        /// full-screen TUI repaints. See
+        /// `InMemoryTerminalSession.nudgeChildViewportToForceRedraw` and
+        /// `TerminalSurfaceCoordinator.nudgeSurfaceResizeForRedraw`.
         public func forceReattachRedraw() {
-            core.configuration.inMemorySession?.nudgeChildViewportToForceRedraw()
+            if let session = core.configuration.inMemorySession {
+                session.nudgeChildViewportToForceRedraw()
+            } else {
+                core.nudgeSurfaceResizeForRedraw()
+            }
         }
 
         override public init(frame: NSRect) {

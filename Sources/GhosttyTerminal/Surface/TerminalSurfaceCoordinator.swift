@@ -222,6 +222,60 @@ final class TerminalSurfaceCoordinator {
         synchronizeMetrics()
     }
 
+    /// Force a reattached `.exec` TUI (Claude Code / vim / … running under
+    /// `zmx attach`, where **ghostty** owns the PTY) to repaint after a
+    /// persisted restore. Reattach recreates the surface at the same size, so
+    /// no resize delta reaches the child and full-screen programs come back
+    /// stale/blank until the user resizes by hand.
+    ///
+    /// Unlike the host-managed path — which nudges only the child's reported
+    /// viewport without touching ghostty's grid (see
+    /// `InMemoryTerminalSession.nudgeChildViewportToForceRedraw`) — under exec
+    /// the only lever we have is ghostty's own surface size. We shrink it by
+    /// one row so ghostty issues a real `TIOCSWINSZ` + `SIGWINCH` to the child,
+    /// then restore the true size on a later runloop turn (a real time gap is
+    /// required — back-to-back `setSize` calls coalesce to a net no-op and emit
+    /// no winsize change). The child sees two genuine SIGWINCHes and repaints.
+    /// The one-row shrink reflows a blank grid (nothing to see); if the frame
+    /// happened to have content it's a brief one-row blip — the same tradeoff
+    /// the host-managed nudge accepts, minus the grid-decoupling it can't do here.
+    func nudgeSurfaceResizeForRedraw() {
+        guard let surface else {
+            TerminalDebugLog.log(.metrics, "exec reattach nudge skipped: missing surface")
+            return
+        }
+        let scale = scaleFactor()
+        let size = viewSize()
+        guard size.width > 0, size.height > 0 else {
+            TerminalDebugLog.log(.metrics, "exec reattach nudge skipped: invalid view size")
+            return
+        }
+        let pixelWidth = UInt32((size.width * scale).rounded(.down))
+        let pixelHeight = UInt32((size.height * scale).rounded(.down))
+        guard pixelWidth > 0, pixelHeight > 1 else {
+            TerminalDebugLog.log(.metrics, "exec reattach nudge skipped: invalid pixel size")
+            return
+        }
+        // Shrink by a full cell height where we can derive it, so the child
+        // observes a whole-row delta; fall back to a single pixel otherwise.
+        var delta: UInt32 = 1
+        if let grid = surface.size(), grid.rows > 0 {
+            delta = max(1, pixelHeight / UInt32(grid.rows))
+        }
+        let shrunk = pixelHeight > delta ? pixelHeight - delta : pixelHeight - 1
+        TerminalDebugLog.log(.metrics, "exec reattach nudge: \(pixelWidth)x\(pixelHeight) -> \(pixelWidth)x\(shrunk) -> restore")
+        surface.setSize(width: pixelWidth, height: shrunk)
+        // Restore the true size on a later turn so ghostty processes the shrink
+        // (and emits its SIGWINCH) before the restore emits the second one.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, let surface = self.surface else { return }
+            surface.setSize(width: pixelWidth, height: pixelHeight)
+            // Re-run the normal sync so Boite-side metrics bookkeeping stays
+            // consistent with the surface's now-restored size.
+            self.synchronizeMetrics()
+        }
+    }
+
     // MARK: - Frame Rendering
 
     func tick() {

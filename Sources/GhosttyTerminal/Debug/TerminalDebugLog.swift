@@ -268,6 +268,8 @@ extension TerminalSessionBackend {
         switch self {
         case .exec:
             "exec"
+        case let .execCommand(command, _):
+            "exec-command(\(command))"
         case .inMemory:
             "in-memory"
         }

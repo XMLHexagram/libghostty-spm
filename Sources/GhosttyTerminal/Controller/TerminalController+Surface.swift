@@ -103,6 +103,40 @@ extension TerminalController {
         platformSetup: (inout ghostty_surface_config_s) -> Void
     ) -> ghostty_surface_t? {
         platformSetup(&config)
+
+        // `.execCommand`: fill the surface config's `command` + `env_vars` with
+        // C strings that must stay valid across `ghostty_surface_new` (ghostty
+        // copies them internally, exactly like `working_directory`). We own the
+        // allocations and free them the instant the call returns.
+        var cCommand: UnsafeMutablePointer<CChar>?
+        var cEnv: UnsafeMutablePointer<ghostty_env_var_s>?
+        var cEnvStrings: [UnsafeMutablePointer<CChar>] = []
+        if case let .execCommand(command, env) = configuration.backend {
+            if let dup = strdup(command) {
+                cCommand = dup
+                config.command = UnsafePointer(dup)
+            }
+            if !env.isEmpty {
+                let buf = UnsafeMutablePointer<ghostty_env_var_s>.allocate(capacity: env.count)
+                var count = 0
+                for (key, value) in env {
+                    guard let k = strdup(key), let v = strdup(value) else { continue }
+                    cEnvStrings.append(k)
+                    cEnvStrings.append(v)
+                    buf[count] = ghostty_env_var_s(key: UnsafePointer(k), value: UnsafePointer(v))
+                    count += 1
+                }
+                cEnv = buf
+                config.env_vars = buf
+                config.env_var_count = count
+            }
+        }
+        defer {
+            if let cCommand { free(cCommand) }
+            for s in cEnvStrings { free(s) }
+            cEnv?.deallocate()
+        }
+
         guard let surface = ghostty_surface_new(app, &config) else {
             return nil
         }
