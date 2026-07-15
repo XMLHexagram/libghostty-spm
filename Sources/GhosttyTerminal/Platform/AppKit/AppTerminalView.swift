@@ -103,6 +103,38 @@
             core.startDisplayLink()
         }
 
+        // MARK: - Cursor focus reconciliation
+
+        /// Tracked ourselves because `window?.firstResponder` isn't updated to
+        /// (or away from) `self` until AFTER `becomeFirstResponder` /
+        /// `resignFirstResponder` return — so we can't read it inside those
+        /// overrides. Kept in sync by those two handlers.
+        var isTerminalFirstResponder = false
+
+        /// When `true`, this surface keeps its ghostty cursor "focused" (a
+        /// blinking, active cursor) even while it is NOT the window's first
+        /// responder — for a host that highlights "typing lands here" on one
+        /// pane while keyboard focus sits elsewhere (e.g. a sidebar list). Does
+        /// NOT change key routing: keystrokes still go to the real first
+        /// responder. Setting it re-reconciles focus immediately.
+        public var keepsCursorFocusWhenNotFirstResponder = false {
+            didSet {
+                guard oldValue != keepsCursorFocusWhenNotFirstResponder else { return }
+                reconcileCursorFocus()
+            }
+        }
+
+        /// Single decision point for the surface's ghostty focus: focused iff the
+        /// window is key AND (we're first responder OR the sticky hint is on).
+        /// Every focus-affecting AppKit callback routes through here so they can't
+        /// disagree, and so a freshly-attached, never-focused surface can't linger
+        /// at ghostty's default (which would blink alongside the real focus).
+        func reconcileCursorFocus() {
+            let focused = (window?.isKeyWindow == true)
+                && (isTerminalFirstResponder || keepsCursorFocusWhenNotFirstResponder)
+            core.setFocus(focused)
+        }
+
         /// Release the ghostty GPU surface for a boite that's been switched
         /// away from. Frees the surface's IOSurfaces / render targets — and,
         /// critically, the WindowServer presentation backing that is the bulk

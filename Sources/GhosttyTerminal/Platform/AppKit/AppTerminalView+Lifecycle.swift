@@ -37,13 +37,18 @@
 
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
-            core.setFocus(true)
+            isTerminalFirstResponder = true
+            reconcileCursorFocus()
             return result
         }
 
         override func resignFirstResponder() -> Bool {
             let result = super.resignFirstResponder()
-            core.setFocus(false)
+            isTerminalFirstResponder = false
+            // Reconcile (NOT unconditional setFocus(false)): if this pane is the
+            // host's sticky "typing lands here" hint, it must keep blinking even
+            // after yielding first responder (e.g. to a sidebar).
+            reconcileCursorFocus()
             return result
         }
 
@@ -61,6 +66,9 @@
                 }
                 updateColorScheme()
                 core.startDisplayLink()
+                // A freshly-built surface defaults to ghostty's own focus state;
+                // reconcile so a non-focused pane doesn't come up blinking.
+                reconcileCursorFocus()
 
                 NotificationCenter.default.addObserver(
                     self,
@@ -93,13 +101,12 @@
         }
 
         @objc internal func windowDidBecomeKey(_: Notification) {
-            let focused = window?.isKeyWindow == true
-                && window?.firstResponder === self
-            core.setFocus(focused)
+            reconcileCursorFocus()
         }
 
         @objc internal func windowDidResignKey(_: Notification) {
-            core.setFocus(false)
+            // Not key → reconcile resolves to unfocused (never blink off-key).
+            reconcileCursorFocus()
         }
 
         override func setFrameSize(_ newSize: NSSize) {
