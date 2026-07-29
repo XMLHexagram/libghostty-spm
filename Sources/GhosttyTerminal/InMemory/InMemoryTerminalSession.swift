@@ -12,6 +12,10 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
     private let lock = NSLock()
     private var surface: ghostty_surface_t?
     private var lastResize: InMemoryTerminalViewport?
+    /// The size currently being handed to `resizeHandler`. Only non-nil for the
+    /// duration of that call — see `dispatchResize` for why the record moved
+    /// after the handler and what this covers while it is in flight.
+    private var inFlightResize: InMemoryTerminalViewport?
     private let writeHandler: @Sendable (Data) -> Void
     private let resizeHandler: @Sendable (InMemoryTerminalViewport) -> Void
 
@@ -48,6 +52,27 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         self.surface = surface
+
+        // Detaching invalidates the resize dedup. `lastResize` means "the child
+        // already has this size", and that claim is only as good as the surface
+        // that produced it: while detached the view keeps laying out and the
+        // window can be resized, all of it unobservable here (the coordinator
+        // logs `synchronizeMetrics skipped: missing surface` and returns before
+        // it reaches us). When a surface comes back, the first size it computes
+        // has to be dispatched even if it matches what we last sent — the child
+        // may well have been resized out from under that record in between.
+        //
+        // The coordinator already drops its own `lastMetrics` on free; this is
+        // the same reset one layer down. Without it the two guards have
+        // different lifetimes, and a size that ever lands in `lastResize`
+        // without reaching the child becomes permanently undeliverable: every
+        // future return to that exact size is swallowed here as "unchanged".
+        // That is the reported bug — the pane renders at the right width while
+        // the shell keeps laying out for the old one.
+        if surface == nil {
+            lastResize = nil
+            inFlightResize = nil
+        }
 
         // Flush whatever queued up while detached — unless we overflowed the
         // cap (a truncated stream would replay a partial frame, so skip it and
@@ -249,7 +274,12 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
     private func dispatchResize(_ resize: InMemoryTerminalViewport) {
         lock.lock()
         let mergedResize = mergedResize(resize)
-        guard mergedResize != lastResize else {
+        // `inFlightResize` covers the window this method opens by recording
+        // late: between unlocking and the handler returning, `lastResize` still
+        // holds the previous size, so a re-entrant or concurrent call carrying
+        // the SAME size would otherwise sail past the guard — and a handler
+        // that synchronously dispatches back would recurse without end.
+        guard mergedResize != lastResize, mergedResize != inFlightResize else {
             lock.unlock()
             TerminalDebugLog.log(
                 .metrics,
@@ -257,7 +287,7 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
             )
             return
         }
-        lastResize = mergedResize
+        inFlightResize = mergedResize
         lock.unlock()
 
         TerminalDebugLog.log(
@@ -265,6 +295,25 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
             "resize dispatched cols=\(mergedResize.columns) rows=\(mergedResize.rows) pixels=\(mergedResize.widthPixels)x\(mergedResize.heightPixels) cell=\(mergedResize.cellWidthPixels)x\(mergedResize.cellHeightPixels)"
         )
         resizeHandler(mergedResize)
+
+        // Record AFTER the handler, not before.
+        //
+        // `lastResize` is a claim that the child has this size, and the only
+        // thing that can make it true is `resizeHandler`. Setting it first meant
+        // the claim was filed whether or not the handler did anything — and it
+        // can do nothing: it hops to the main actor, and every backend's
+        // implementation begins by unwrapping a weak reference that is gone
+        // once the panel's backend has been torn down. One dropped delivery
+        // used to be permanent, because the record said "sent" and every
+        // identical retry hit the guard above.
+        //
+        // Recording afterwards costs a redundant re-send in the case where the
+        // handler DID deliver but something later diverged; the previous
+        // ordering cost a size that could never be delivered again.
+        lock.lock()
+        lastResize = mergedResize
+        inFlightResize = nil
+        lock.unlock()
     }
 
     private func mergedResize(_ resize: InMemoryTerminalViewport) -> InMemoryTerminalViewport {
