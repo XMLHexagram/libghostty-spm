@@ -30,8 +30,35 @@ final class TerminalCallbackBridge {
         self.delegate = delegate
     }
 
+    /// Actions the host takes responsibility for, so ghostty must not fall back
+    /// to handling them itself.
+    ///
+    /// Returned all the way up to `ghostty_runtime_config_s`'s action callback,
+    /// whose `false` means "nobody handled this". For `SHOW_CHILD_EXITED` that
+    /// answer is actively wrong here: told no, ghostty prints "Process exited.
+    /// Press any key to close the terminal." into the grid and arms a keypress
+    /// to close — a second, competing exit affordance on top of the host's own
+    /// overlay, and it lands FIRST, so the overlay only appeared after the user
+    /// had already pressed a key to dismiss ghostty's version.
+    /// `nonisolated` because the C action callback answers ghostty
+    /// synchronously, off any actor — the reply has to be the return value of
+    /// that call, not something a hop to the main actor produces later.
+    nonisolated static func handles(_ tag: ghostty_action_tag_e) -> Bool {
+        tag == GHOSTTY_ACTION_SHOW_CHILD_EXITED
+    }
+
     func handleAction(_ action: ghostty_action_s) {
         switch action.tag {
+        case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+            TerminalDebugLog.log(
+                .lifecycle,
+                "callback action=show_child_exited exit=\(action.action.child_exited.exit_code)"
+            )
+            // Surface the exit NOW. Ghostty otherwise only reports it through
+            // `close`, which on the message path is gated behind the keypress.
+            (delegate as? any TerminalSurfaceCloseDelegate)?
+                .terminalDidClose(processAlive: false)
+
         case GHOSTTY_ACTION_SET_TITLE:
             if let cStr = action.action.set_title.title {
                 let title = String(cString: cStr)

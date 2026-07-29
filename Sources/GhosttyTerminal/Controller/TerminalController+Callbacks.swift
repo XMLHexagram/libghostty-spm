@@ -40,7 +40,11 @@ private enum TerminalCallbacks {
             bridge.handleAction(action)
         }
 
-        return false
+        // `true` suppresses ghostty's own fallback for the actions the host
+        // owns — see `TerminalCallbackBridge.handles`. Everything else keeps
+        // answering `false`, which is what lets ghostty go on handling the
+        // actions this bridge only observes.
+        return TerminalCallbackBridge.handles(action.tag)
     }
 
     static func closeSurface(
