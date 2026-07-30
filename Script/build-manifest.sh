@@ -9,24 +9,36 @@ if [ ! -f .root ]; then
     exit 1
 fi
 
-XCFRAMEWORK_PATH_ZIP=${1:-}
-DOWNLOAD_URL=${2:-}
+ARM64_ZIP=${1:-}
+ARM64_URL=${2:-}
+X86_64_ZIP=${3:-}
+X86_64_URL=${4:-}
 
-if [ -z "$XCFRAMEWORK_PATH_ZIP" ] || [ -z "$DOWNLOAD_URL" ]; then
-    echo "Usage: $0 <xcframework_zip> <download_url>"
+if [ -z "$ARM64_ZIP" ] || [ -z "$ARM64_URL" ] || [ -z "$X86_64_ZIP" ] || [ -z "$X86_64_URL" ]; then
+    echo "Usage: $0 <arm64_zip> <arm64_url> <x86_64_zip> <x86_64_url>"
+    echo
+    echo "Two assets, one per arch — see the note at the top of"
+    echo "Package.swift.template for why, and for the environment variable that"
+    echo "picks between them at resolve time."
     exit 1
 fi
 
-if [ ! -f "$XCFRAMEWORK_PATH_ZIP" ]; then
-    echo "[!] $XCFRAMEWORK_PATH_ZIP not found"
-    exit 1
-fi
+for f in "$ARM64_ZIP" "$X86_64_ZIP"; do
+    if [ ! -f "$f" ]; then
+        echo "[!] $f not found"
+        exit 1
+    fi
+done
 
-SHA256SUM=$(shasum -a 256 "$XCFRAMEWORK_PATH_ZIP" | awk '{print $1}')
-echo "[*] SHA256: $SHA256SUM"
+ARM64_SUM=$(shasum -a 256 "$ARM64_ZIP" | awk '{print $1}')
+X86_64_SUM=$(shasum -a 256 "$X86_64_ZIP" | awk '{print $1}')
+echo "[*] arm64  SHA256: $ARM64_SUM"
+echo "[*] x86_64 SHA256: $X86_64_SUM"
 
 PACKAGE_MANIFEST=$(cat Package.swift.template)
-PACKAGE_MANIFEST=${PACKAGE_MANIFEST/__DOWNLOAD_URL__/$DOWNLOAD_URL}
-PACKAGE_MANIFEST=${PACKAGE_MANIFEST/__CHECKSUM__/$SHA256SUM}
+PACKAGE_MANIFEST=${PACKAGE_MANIFEST/__DOWNLOAD_URL_ARM64__/$ARM64_URL}
+PACKAGE_MANIFEST=${PACKAGE_MANIFEST/__CHECKSUM_ARM64__/$ARM64_SUM}
+PACKAGE_MANIFEST=${PACKAGE_MANIFEST/__DOWNLOAD_URL_X86_64__/$X86_64_URL}
+PACKAGE_MANIFEST=${PACKAGE_MANIFEST/__CHECKSUM_X86_64__/$X86_64_SUM}
 
 echo "$PACKAGE_MANIFEST" >Package.swift

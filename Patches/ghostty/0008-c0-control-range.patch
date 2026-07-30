@@ -1,0 +1,27 @@
+diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
+index e89c73e66..466c3d1ac 100644
+--- a/src/terminal/stream.zig
++++ b/src/terminal/stream.zig
+@@ -518,7 +518,21 @@ pub fn Stream(comptime Handler: type) type {
+             while (self.parser.state == .ground and offset < input.len) {
+                 const res = simd.vt.utf8DecodeUntilControlSeq(input[offset..], cp_buf);
+                 for (cp_buf[0..res.decoded]) |cp| {
+-                    if (cp <= 0xF) {
++                    // 0x1F, not 0x0F: C0 runs 0x00-0x1F. The lower bound was
++                    // `execute`'s implemented range (SI, 0x0F, is the last one
++                    // it acts on) — but "execute does nothing for these" and
++                    // "these are printable" are different conclusions, and this
++                    // path drew the second. DLE through US were being rendered
++                    // as occupied cells.
++                    //
++                    // The scalar path never had this: `Parser` emits `.execute`
++                    // for 0x19 and there is a test asserting it. This fast path
++                    // bypasses the parser, so that test kept passing.
++                    //
++                    // Safe: `ansi.C0` is non-exhaustive precisely so
++                    // `@enumFromInt` can't fail on user input, and `execute`
++                    // logs + ignores anything it has no case for.
++                    if (cp <= 0x1F) {
+                         try self.execute(@intCast(cp));
+                     } else {
+                         try self.print(@intCast(cp));
