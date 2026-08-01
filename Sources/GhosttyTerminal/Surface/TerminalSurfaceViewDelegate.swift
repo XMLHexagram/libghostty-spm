@@ -64,3 +64,15 @@ public protocol TerminalSurfaceCommandFinishedDelegate: TerminalSurfaceViewDeleg
 public protocol TerminalSurfaceDesktopNotificationDelegate: TerminalSurfaceViewDelegate {
     func terminalDidRequestDesktopNotification(title: String, body: String)
 }
+
+/// The viewport moved within the scrollback, or the scrollback's size changed.
+///
+/// Ghostty pushes this on every draw where the geometry differs from the last
+/// one — it computes the numbers and leaves the drawing to the host, which is
+/// the only party that knows whether this surface should show a scrollbar at
+/// all. Expect it at frame rate while scrolling: coalesce or compare before
+/// doing layout work.
+@MainActor
+public protocol TerminalSurfaceScrollbarDelegate: TerminalSurfaceViewDelegate {
+    func terminalDidUpdateScrollbar(_ metrics: TerminalScrollbarMetrics)
+}

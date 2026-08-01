@@ -112,6 +112,14 @@ final class TerminalCallbackBridge {
             (delegate as? any TerminalSurfaceSearchDelegate)?
                 .terminalDidUpdateSearchSelected(Int(selected))
 
+        case GHOSTTY_ACTION_SCROLLBAR:
+            // Deliberately NOT logged. Ghostty emits this on every draw whose
+            // scrollbar geometry differs from the last one, so a log line here
+            // floods the `.actions` category for the whole duration of any
+            // scroll and buries everything else in it.
+            (delegate as? any TerminalSurfaceScrollbarDelegate)?
+                .terminalDidUpdateScrollbar(TerminalScrollbarMetrics(action.action.scrollbar))
+
         case GHOSTTY_ACTION_OPEN_URL:
             let openURL = action.action.open_url
             if let cStr = openURL.url {
