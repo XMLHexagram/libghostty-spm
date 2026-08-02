@@ -22,8 +22,8 @@ import PackageDescription
 // change here.
 let libghosttyArch = ProcessInfo.processInfo.environment["LIBGHOSTTY_ARCH"] ?? "arm64"
 let libghosttyBinary: (url: String, checksum: String) = libghosttyArch == "x86_64"
-    ? ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.3.0/GhosttyKit-x86_64.xcframework.zip", "f3f8539c10794efb9a9b1124aeea27468e3749322c605936a60d4cbc4a59a3dd")
-    : ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.3.0/GhosttyKit-arm64.xcframework.zip", "4be77699c0070ad4010db6e258204440194f3bba06f882c7b08d12f5584e6cb8")
+    ? ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.4.0/GhosttyKit-x86_64.xcframework.zip", "9327cedbd7d9614b33b106e52773d2c32dab4562aa9044fce052bd321b266456")
+    : ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.4.0/GhosttyKit-arm64.xcframework.zip", "a74bca8cc85dafad96ad6319e25d12dc80f08f434629920668f7d82056045816")
 
 let package = Package(
     name: "GhosttyKit",
@@ -39,7 +39,6 @@ let package = Package(
         .library(name: "GhosttyTheme", targets: ["GhosttyTheme"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/Lakr233/MSDisplayLink.git", from: "2.1.0"),
     ],
     targets: [
         .target(
@@ -53,7 +52,7 @@ let package = Package(
         ),
         .target(
             name: "GhosttyTerminal",
-            dependencies: ["GhosttyKit", "MSDisplayLink"],
+            dependencies: ["GhosttyKit"],
             path: "Sources/GhosttyTerminal"
         ),
         .target(
