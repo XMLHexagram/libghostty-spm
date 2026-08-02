@@ -1,0 +1,16 @@
+--- a/build.zig
++++ b/build.zig
+@@ -116,7 +116,12 @@
+         );
+     };
+     libghostty_vt_shared.install(libvt_step);
+-    libghostty_vt_shared.install(b.getInstallStep());
++    // LIBGHOSTTY_SPM_SKIP_XCFRAMEWORK: the standalone ghostty-vt dylib is not
++    // consumed by libghostty-spm, and building it drags SIMD C++ through zig
++    // 0.15.2's bundled libc++, which fails on `INFINITY` in
++    // __random/clamp_to_integral.h. libghostty.a comes from patch 0001's
++    // libghostty_static.install and is independent of this.
++    // libghostty_vt_shared.install(b.getInstallStep());
+ 
+     // Helpgen
+     if (config.emit_helpgen) deps.help_strings.install();

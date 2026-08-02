@@ -1,0 +1,287 @@
+--- a/src/renderer/State.zig
++++ b/src/renderer/State.zig
+@@ -30,6 +30,16 @@
+ /// need about the mouse.
+ mouse: Mouse = .{},
+ 
++/// Sub-row scroll offset in PIXELS, for smooth (sub-cell) scrolling.
++///
++/// Positive shifts the grid DOWN, i.e. toward revealing the row above the
++/// viewport. Always smaller than one cell height: whole rows are scrolled by
++/// the terminal itself and only the remainder lands here.
++///
++/// Written by `Surface.scrollCallback` under the state mutex and read once per
++/// frame by the renderer. Zero unless `smooth-scroll` is on.
++scroll_offset_px: f32 = 0,
++
+ pub const Mouse = struct {
+     /// The point on the viewport where the mouse currently is. We use
+     /// viewport points to avoid the complexity of mapping the mouse to
+--- a/src/Surface.zig
++++ b/src/Surface.zig
+@@ -311,6 +311,7 @@
+     mouse_hide_while_typing: bool,
+     mouse_reporting: bool,
+     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
++    smooth_scroll: bool,
+     mouse_shift_capture: configpkg.MouseShiftCapture,
+     fullscreen: configpkg.Fullscreen,
+     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
+@@ -389,6 +390,7 @@
+             .mouse_hide_while_typing = config.@"mouse-hide-while-typing",
+             .mouse_reporting = config.@"mouse-reporting",
+             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
++            .smooth_scroll = config.@"smooth-scroll",
+             .mouse_shift_capture = config.@"mouse-shift-capture",
+             .fullscreen = config.fullscreen,
+             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
+@@ -2101,11 +2103,18 @@
+     };
+ 
+     const y: f64 = y: {
++        // Shifted by the smooth-scroll offset for the same reason as
++        // `posToViewport`, in the opposite direction: this converts a CELL to a
++        // pixel, so it follows the grid down. Hosts derive the cursor's row
++        // from this rect (Boite's click-to-move-cursor does), so leaving it
++        // unshifted would put the reported cursor a row away from the drawn one.
+         // Simple y * cell height gives the top-left corner, then add padding offset
+         var y: f64 = @floatFromInt(cursor.y * self.size.cell.height + self.size.padding.top);
+ 
+         // We want the bottom
+         y += @floatFromInt(self.size.cell.height);
++
++        y += @as(f64, self.renderer_state.scroll_offset_px);
+ 
+         // And scale it
+         y /= content_scale.y;
+@@ -3451,6 +3460,12 @@
+         break :y .{ .delta = delta };
+     };
+ 
++    // Smooth scrolling: hand the leftover fraction of a row to the renderer so
++    // it can draw the grid part-way between two rows. Without this the
++    // remainder just sits in `pending_scroll_y` until it grows into a whole
++    // row, which is exactly what makes scrolling look stepped.
++    self.publishScrollOffset();
++
+     // For detailed comments see the y calculation above.
+     const x: ScrollAmount = if (xoff == 0) .{} else x: {
+         if (!scroll_mods.precision) {
+@@ -5072,11 +5087,68 @@
+ 
+     // If mode 2031 is on, then we report the change live.
+     self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
++}
++
++/// Publish the sub-row scroll remainder to the renderer.
++///
++/// Bypassed on the alternate screen and while mouse reporting is on: that
++/// scrolling is arrow-key injection into a full-screen program, not viewport
++/// movement, so a fractional offset would smear a TUI that never asked to
++/// move. Zeroed rather than left stale in those cases.
++fn publishScrollOffset(self: *Surface) void {
++    self.renderer_state.mutex.lock();
++    defer self.renderer_state.mutex.unlock();
++
++    const t = self.renderer_state.terminal;
++    const enabled = self.config.smooth_scroll and
++        t.screens.active_key != .alternate and
++        t.flags.mouse_event == .none;
++
++    var offset: f32 = if (enabled)
++        @floatCast(self.mouse.pending_scroll_y)
++    else
++        0;
++
++    // Clamp at the ends of the scrollback.
++    //
++    // The remainder keeps accumulating even when the viewport has nowhere left
++    // to go, so without this the grid slides off its own last row — revealing
++    // blank space — and snaps back each time the accumulation crosses a cell.
++    // That reads as a shudder every time you arrive at the bottom, which is
++    // where a terminal spends most of its life.
++    //
++    // A positive offset shifts the grid DOWN to reveal the row above, so it
++    // needs scrollback above; a negative one reveals below and needs room
++    // below. `scrollbar()` reports both in rows.
++    if (offset != 0) {
++        const bar = t.screens.active.pages.scrollbar();
++        const at_top = bar.offset == 0;
++        const at_bottom = bar.offset + bar.len >= bar.total;
++        if ((offset > 0 and at_top) or (offset < 0 and at_bottom)) offset = 0;
++    }
++
++    if (self.renderer_state.scroll_offset_px == offset) return;
++    self.renderer_state.scroll_offset_px = offset;
++    self.queueRender() catch {};
+ }
+ 
+ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
+-    // Get our grid cell
+-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
++    // Smooth scrolling draws the grid `scroll_offset_px` lower than its row
++    // boundary, so a given screen pixel belongs to a cell that much EARLIER.
++    // Subtract it back out or every pixel→cell answer is wrong by up to a row
++    // for as long as an offset is showing — and this one function is where
++    // clicks, drag-selection, hover, link hit-testing and mouse reporting all
++    // ask that question (eight call sites, one place to fix).
++    //
++    // Mirrors `cell_bg_fragment`'s `cell_rel.y -= scroll_offset_px`: the shader
++    // and the hit test have to agree on where a row is, or you select the line
++    // above the one you pointed at.
++    //
++    // Read without the renderer mutex on purpose: this value is written by
++    // `publishScrollOffset` on the same (apprt) thread that delivers the mouse
++    // events calling this, so there is no cross-thread read to guard.
++    const adjusted_y = ypos - @as(f64, self.renderer_state.scroll_offset_px);
++    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = adjusted_y } };
+     const grid = coord.convert(.grid, self.size).grid;
+     return .{ .x = grid.x, .y = grid.y };
+ }
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -723,6 +723,7 @@
+                     .screen_size = undefined,
+                     .padding_extend = .{},
+                     .min_contrast = options.config.min_contrast,
++                    .scroll_offset_px = 0,
+                     .cursor_pos = .{ std.math.maxInt(u16), std.math.maxInt(u16) },
+                     .cursor_color = undefined,
+                     .bg_color = .{
+@@ -1158,6 +1159,7 @@
+                 mouse: renderer.State.Mouse,
+                 preedit: ?renderer.State.Preedit,
+                 scrollbar: terminal.Scrollbar,
++                scroll_offset_px: f32,
+                 overlay_features: []const Overlay.Feature,
+             };
+ 
+@@ -1214,6 +1216,7 @@
+                 // can be expensive) and also makes it so we don't need another
+                 // cross-thread mailbox message within the IO path.
+                 const scrollbar = state.terminal.screens.active.pages.scrollbar();
++                const scroll_offset_px = state.scroll_offset_px;
+ 
+                 // Get our preedit state
+                 const preedit: ?renderer.State.Preedit = preedit: {
+@@ -1275,6 +1278,7 @@
+                     .mouse = state.mouse,
+                     .preedit = preedit,
+                     .scrollbar = scrollbar,
++                    .scroll_offset_px = scroll_offset_px,
+                     .overlay_features = overlay_features,
+                 };
+             };
+@@ -1386,6 +1390,41 @@
+                 }
+ 
+                 // Update our background color
++                // Sub-row scroll offset. Set per frame (not in
++                // `updateScreenSizeUniforms`, which only runs on resize) and
++                // uploaded by `drawFrame`'s `uniforms.sync`.
++                self.uniforms.scroll_offset_px = critical.scroll_offset_px;
++
++                // Shifting the grid opens a sliver at the edge it moved away
++                // from, up to one cell tall. We snapshot exactly the viewport's
++                // rows, so there is no row to draw there — and an unpainted
++                // sliver is TRANSPARENT, which on a surface with
++                // `background-opacity` < 1 shows the desktop (or in Boite, the
++                // app's background image) as a bright band along the edge.
++                //
++                // Extending the adjacent row's background into it costs one
++                // flag and makes the sliver read as terminal background, which
++                // is what it would be if the row were there. It does not draw
++                // the row's TEXT — sliding text in needs the row snapshotted,
++                // which is a larger change (`grid_size.y` then stops meaning
++                // "viewport rows" and every consumer of it has to be audited).
++                //
++                // Set after `rebuildCells`, so this wins over the `.extend`
++                // heuristics for the frames that need it. It is NOT unset when
++                // the offset returns to 0 — the heuristic that would restore it
++                // only runs on a rebuild. That is fine in practice and the
++                // reason is worth stating: moving the viewport by a row changes
++                // the pin, which forces a full rebuild, so any scroll that ends
++                // on a new row re-decides this immediately. The one case that
++                // lingers is scrolling back to the exact boundary you started
++                // on, where the residue is a sliver of padding drawn in the
++                // adjacent row's background instead of the heuristic's choice.
++                if (critical.scroll_offset_px > 0) {
++                    self.uniforms.padding_extend.up = true;
++                } else if (critical.scroll_offset_px < 0) {
++                    self.uniforms.padding_extend.down = true;
++                }
++
+                 self.uniforms.bg_color = .{
+                     self.terminal_state.colors.background.r,
+                     self.terminal_state.colors.background.g,
+--- a/src/renderer/metal/shaders.zig
++++ b/src/renderer/metal/shaders.zig
+@@ -219,6 +219,12 @@
+     /// The minimum contrast ratio for text. The contrast ratio is calculated
+     /// according to the WCAG 2.0 spec.
+     min_contrast: f32 align(4),
++
++    /// Sub-row scroll offset in pixels; positive shifts the grid DOWN.
++    /// See `renderer.State.scroll_offset_px`. Must stay in the same position
++    /// as its counterpart in shaders.metal — the two structs are matched by
++    /// field order, not by name.
++    scroll_offset_px: f32 align(4),
+ 
+     /// The cursor position and color.
+     cursor_pos: [2]u16 align(4),
+--- a/src/renderer/shaders/shaders.metal
++++ b/src/renderer/shaders/shaders.metal
+@@ -17,6 +17,7 @@
+   float4 grid_padding;
+   uint8_t padding_extend;
+   float min_contrast;
++  float scroll_offset_px;
+   ushort2 cursor_pos;
+   uchar4 cursor_color;
+   uchar4 bg_color;
+@@ -453,7 +454,11 @@
+   constant Uniforms& uniforms [[buffer(1)]],
+   constant uchar4 *cells [[buffer(2)]]
+ ) {
+-  int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx) / uniforms.cell_size));
++  // Sub-row scroll: the grid is drawn `scroll_offset_px` lower than its row
++  // boundary, so a given screen pixel maps to a cell that much EARLIER.
++  float2 cell_rel = in.position.xy - uniforms.grid_padding.wx;
++  cell_rel.y -= uniforms.scroll_offset_px;
++  int2 grid_pos = int2(floor(cell_rel / uniforms.cell_size));
+ 
+   float4 bg = float4(0.0);
+ 
+@@ -561,6 +566,7 @@
+ ) {
+   // Convert the grid x, y into world space x, y by accounting for cell size
+   float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
++  cell_pos.y += uniforms.scroll_offset_px;
+ 
+   // We use a triangle strip with 4 vertices to render quads,
+   // so we determine which corner of the cell this vertex is in
+@@ -821,6 +827,7 @@
+   // The position of our image starts at the top-left of the grid cell and
+   // adds the source rect width/height components.
+   float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
++  image_pos.y += uniforms.scroll_offset_px;
+   image_pos += in.dest_size * corner;
+ 
+   out.position =
+--- a/src/config/Config.zig
++++ b/src/config/Config.zig
+@@ -987,6 +987,14 @@
+ ///
+ /// The default value is "3" for discrete devices and "1" for precision devices.
+ @"mouse-scroll-multiplier": MouseScrollMultiplier = .default,
++
++/// Scroll the viewport at pixel granularity instead of snapping a whole row at
++/// a time.
++///
++/// Only affects the primary screen's viewport. Alternate-screen (full-screen
++/// TUI) scrolling is arrow-key injection into the running program and cannot be
++/// made smooth from here.
++@"smooth-scroll": bool = false,
+ 
+ /// The opacity level (opposite of transparency) of the background. A value of
+ /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
