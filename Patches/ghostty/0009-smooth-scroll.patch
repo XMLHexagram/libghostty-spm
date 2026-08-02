@@ -202,7 +202,7 @@
                      .overlay_features = overlay_features,
                  };
              };
-@@ -1386,6 +1406,61 @@
+@@ -1386,6 +1406,31 @@
                  }
  
                  // Update our background color
@@ -231,40 +231,10 @@
 +                    };
 +                }
 +
-+                // Shifting the grid opens a sliver at the edge it moved away
-+                // from, up to one cell tall. We snapshot exactly the viewport's
-+                // rows, so there is no row to draw there — and an unpainted
-+                // sliver is TRANSPARENT, which on a surface with
-+                // `background-opacity` < 1 shows the desktop (or in Boite, the
-+                // app's background image) as a bright band along the edge.
-+                //
-+                // Extending the adjacent row's background into it costs one
-+                // flag and makes the sliver read as terminal background, which
-+                // is what it would be if the row were there. It does not draw
-+                // the row's TEXT — sliding text in needs the row snapshotted,
-+                // which is a larger change (`grid_size.y` then stops meaning
-+                // "viewport rows" and every consumer of it has to be audited).
-+                //
-+                // Set after `rebuildCells`, so this wins over the `.extend`
-+                // heuristics for the frames that need it. It is NOT unset when
-+                // the offset returns to 0 — the heuristic that would restore it
-+                // only runs on a rebuild. That is fine in practice and the
-+                // reason is worth stating: moving the viewport by a row changes
-+                // the pin, which forces a full rebuild, so any scroll that ends
-+                // on a new row re-decides this immediately. The one case that
-+                // lingers is scrolling back to the exact boundary you started
-+                // on, where the residue is a sliver of padding drawn in the
-+                // adjacent row's background instead of the heuristic's choice.
-+                if (critical.scroll_offset_px > 0) {
-+                    self.uniforms.padding_extend.up = true;
-+                } else if (critical.scroll_offset_px < 0) {
-+                    self.uniforms.padding_extend.down = true;
-+                }
-+
                  self.uniforms.bg_color = .{
                      self.terminal_state.colors.background.r,
                      self.terminal_state.colors.background.g,
-@@ -2321,12 +2396,12 @@
+@@ -2321,12 +2366,12 @@
              // }
  
              const grid_size_diff =
@@ -279,7 +249,7 @@
                  new_size.columns = state.cols;
                  try self.cells.resize(self.alloc, new_size);
  
-@@ -2374,7 +2449,7 @@
+@@ -2374,7 +2419,7 @@
              // the viewport is shorter than the cell contents buffer, we align
              // the top of the viewport with the top of the contents buffer.
              const row_len: usize = @min(
@@ -288,7 +258,7 @@
                  self.cells.size.rows,
              );
  
-@@ -2636,7 +2711,11 @@
+@@ -2636,7 +2681,11 @@
                  .background, .@"extend-always" => {},
  
                  // Apply heuristics for padding extension.
@@ -301,7 +271,7 @@
                      self.uniforms.padding_extend.up = !rowNeverExtendBg(
                          row,
                          cells_raw,
-@@ -2644,7 +2723,7 @@
+@@ -2644,7 +2693,7 @@
                          &state.colors.palette,
                          state.colors.background,
                      );
