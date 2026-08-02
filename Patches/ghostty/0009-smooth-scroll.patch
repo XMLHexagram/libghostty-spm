@@ -145,18 +145,19 @@
  }
 --- a/src/renderer/generic.zig
 +++ b/src/renderer/generic.zig
-@@ -723,6 +723,10 @@
+@@ -723,6 +723,11 @@
                      .screen_size = undefined,
                      .padding_extend = .{},
                      .min_contrast = options.config.min_contrast,
 +                    .grid_offset_px = 0,
++                    .viewport_offset_px = 0,
 +                    .clip_top_px = 0,
 +                    .clip_bottom_px = 0,
 +                    .viewport_rows = .{ 0, 0 },
                      .cursor_pos = .{ std.math.maxInt(u16), std.math.maxInt(u16) },
                      .cursor_color = undefined,
                      .bg_color = .{
-@@ -1158,6 +1162,9 @@
+@@ -1158,6 +1163,9 @@
                  mouse: renderer.State.Mouse,
                  preedit: ?renderer.State.Preedit,
                  scrollbar: terminal.Scrollbar,
@@ -166,7 +167,7 @@
                  overlay_features: []const Overlay.Feature,
              };
  
-@@ -1200,7 +1207,11 @@
+@@ -1200,7 +1208,11 @@
                  }
  
                  // Update our terminal state
@@ -179,7 +180,7 @@
  
                  // If our terminal state is dirty at all we need to redo
                  // the viewport search.
-@@ -1214,6 +1225,12 @@
+@@ -1214,6 +1226,12 @@
                  // can be expensive) and also makes it so we don't need another
                  // cross-thread mailbox message within the IO path.
                  const scrollbar = state.terminal.screens.active.pages.scrollbar();
@@ -192,7 +193,7 @@
  
                  // Get our preedit state
                  const preedit: ?renderer.State.Preedit = preedit: {
-@@ -1275,6 +1292,9 @@
+@@ -1275,6 +1293,9 @@
                      .mouse = state.mouse,
                      .preedit = preedit,
                      .scrollbar = scrollbar,
@@ -202,7 +203,7 @@
                      .overlay_features = overlay_features,
                  };
              };
-@@ -1386,6 +1406,31 @@
+@@ -1386,6 +1407,33 @@
                  }
  
                  // Update our background color
@@ -221,6 +222,8 @@
 +
 +                    // The band the viewport actually occupies. `grid_padding`
 +                    // is [top, right, bottom, left].
++                    self.uniforms.viewport_offset_px = critical.scroll_offset_px;
++
 +                    const top = self.uniforms.grid_padding[0];
 +                    self.uniforms.clip_top_px = top;
 +                    self.uniforms.clip_bottom_px = top +
@@ -234,7 +237,7 @@
                  self.uniforms.bg_color = .{
                      self.terminal_state.colors.background.r,
                      self.terminal_state.colors.background.g,
-@@ -2321,12 +2366,12 @@
+@@ -2321,12 +2369,12 @@
              // }
  
              const grid_size_diff =
@@ -249,7 +252,7 @@
                  new_size.columns = state.cols;
                  try self.cells.resize(self.alloc, new_size);
  
-@@ -2374,7 +2419,7 @@
+@@ -2374,7 +2422,7 @@
              // the viewport is shorter than the cell contents buffer, we align
              // the top of the viewport with the top of the contents buffer.
              const row_len: usize = @min(
@@ -258,7 +261,7 @@
                  self.cells.size.rows,
              );
  
-@@ -2636,7 +2681,11 @@
+@@ -2636,7 +2684,11 @@
                  .background, .@"extend-always" => {},
  
                  // Apply heuristics for padding extension.
@@ -271,7 +274,7 @@
                      self.uniforms.padding_extend.up = !rowNeverExtendBg(
                          row,
                          cells_raw,
-@@ -2644,7 +2693,7 @@
+@@ -2644,7 +2696,7 @@
                          &state.colors.palette,
                          state.colors.background,
                      );
@@ -282,7 +285,7 @@
                          cells_raw,
 --- a/src/renderer/metal/shaders.zig
 +++ b/src/renderer/metal/shaders.zig
-@@ -219,7 +219,29 @@
+@@ -219,6 +219,32 @@
      /// The minimum contrast ratio for text. The contrast ratio is calculated
      /// according to the WCAG 2.0 spec.
      min_contrast: f32 align(4),
@@ -298,9 +301,13 @@
 +    /// Must stay in the same position as its counterpart in shaders.metal —
 +    /// the two structs are matched by field order, not by name.
 +    grid_offset_px: f32 align(4),
- 
++
 +    /// Viewport bounds in pixels. The extra rows would otherwise paint over
 +    /// the window padding, so fragments outside this band are discarded.
++    /// For anything positioned in VIEWPORT rows rather than grid rows —
++    /// kitty image placements, whose y is a viewport offset. They must slide
++    /// with the scroll but must NOT take the grid's extra-row shift.
++    viewport_offset_px: f32 align(4),
 +    clip_top_px: f32 align(4),
 +    clip_bottom_px: f32 align(4),
 +    /// First and last VIEWPORT row in grid space, i.e. `extra_top` and
@@ -308,24 +315,24 @@
 +    /// taking its colour from a row the user can actually see, rather than
 +    /// from an extra row that is only there to slide in.
 +    viewport_rows: [2]u16 align(4),
-+
+ 
      /// The cursor position and color.
      cursor_pos: [2]u16 align(4),
-     cursor_color: [4]u8 align(4),
 --- a/src/renderer/shaders/shaders.metal
 +++ b/src/renderer/shaders/shaders.metal
-@@ -17,6 +17,10 @@
+@@ -17,6 +17,11 @@
    float4 grid_padding;
    uint8_t padding_extend;
    float min_contrast;
 +  float grid_offset_px;
++  float viewport_offset_px;
 +  float clip_top_px;
 +  float clip_bottom_px;
 +  ushort2 viewport_rows;
    ushort2 cursor_pos;
    uchar4 cursor_color;
    uchar4 bg_color;
-@@ -453,10 +457,22 @@
+@@ -453,10 +458,22 @@
    constant Uniforms& uniforms [[buffer(1)]],
    constant uchar4 *cells [[buffer(2)]]
  ) {
@@ -349,7 +356,7 @@
    // Clamp x position, extends edge bg colors in to padding on sides.
    if (grid_pos.x < 0) {
      if (uniforms.padding_extend & EXTEND_LEFT) {
-@@ -469,6 +485,20 @@
+@@ -469,6 +486,20 @@
        grid_pos.x = uniforms.grid_size.x - 1;
      } else {
        return bg;
@@ -370,7 +377,7 @@
      }
    }
  
-@@ -561,6 +591,7 @@
+@@ -561,6 +592,7 @@
  ) {
    // Convert the grid x, y into world space x, y by accounting for cell size
    float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
@@ -378,7 +385,7 @@
  
    // We use a triangle strip with 4 vertices to render quads,
    // so we determine which corner of the cell this vertex is in
-@@ -675,12 +706,21 @@
+@@ -675,12 +707,21 @@
    return out;
  }
  
@@ -400,15 +407,18 @@
    constexpr sampler textureSampler(
      coord::pixel,
      address::clamp_to_edge,
-@@ -821,6 +861,7 @@
+@@ -821,6 +862,10 @@
    // The position of our image starts at the top-left of the grid cell and
    // adds the source rect width/height components.
    float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
-+  image_pos.y += uniforms.grid_offset_px;
++  // `in.grid_pos` for a placement is VIEWPORT-relative (see `image.zig`'s
++  // `y_pos`), so it takes the scroll offset alone. `grid_offset_px` would also
++  // apply the grid's extra-row shift and draw every image a row too high.
++  image_pos.y += uniforms.viewport_offset_px;
    image_pos += in.dest_size * corner;
  
    out.position =
-@@ -834,6 +875,13 @@
+@@ -834,6 +879,13 @@
    texture2d<float> image [[texture(0)]],
    constant Uniforms& uniforms [[buffer(1)]]
  ) {
