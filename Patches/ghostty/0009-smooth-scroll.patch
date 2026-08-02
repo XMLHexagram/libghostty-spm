@@ -1,6 +1,6 @@
 --- a/src/renderer/State.zig
 +++ b/src/renderer/State.zig
-@@ -30,6 +30,16 @@
+@@ -30,6 +30,21 @@
  /// need about the mouse.
  mouse: Mouse = .{},
  
@@ -13,6 +13,11 @@
 +/// Written by `Surface.scrollCallback` under the state mutex and read once per
 +/// frame by the renderer. Zero unless `smooth-scroll` is on.
 +scroll_offset_px: f32 = 0,
++
++/// Whether smooth scrolling is on. Separate from the offset being nonzero: the
++/// offset passes through zero constantly mid-gesture, and the extra snapshotted
++/// rows must not appear and vanish with it.
++smooth_scroll: bool = false,
 +
  pub const Mouse = struct {
      /// The point on the viewport where the mouse currently is. We use
@@ -67,11 +72,10 @@
      // For detailed comments see the y calculation above.
      const x: ScrollAmount = if (xoff == 0) .{} else x: {
          if (!scroll_mods.precision) {
-@@ -5072,11 +5087,68 @@
- 
+@@ -5073,10 +5088,68 @@
      // If mode 2031 is on, then we report the change live.
      self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
-+}
+ }
 +
 +/// Publish the sub-row scroll remainder to the renderer.
 +///
@@ -82,8 +86,9 @@
 +fn publishScrollOffset(self: *Surface) void {
 +    self.renderer_state.mutex.lock();
 +    defer self.renderer_state.mutex.unlock();
-+
+ 
 +    const t = self.renderer_state.terminal;
++    self.renderer_state.smooth_scroll = self.config.smooth_scroll;
 +    const enabled = self.config.smooth_scroll and
 +        t.screens.active_key != .alternate and
 +        t.flags.mouse_event == .none;
@@ -114,8 +119,8 @@
 +    if (self.renderer_state.scroll_offset_px == offset) return;
 +    self.renderer_state.scroll_offset_px = offset;
 +    self.queueRender() catch {};
- }
- 
++}
++
  pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
 -    // Get our grid cell
 -    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
@@ -140,46 +145,91 @@
  }
 --- a/src/renderer/generic.zig
 +++ b/src/renderer/generic.zig
-@@ -723,6 +723,7 @@
+@@ -723,6 +723,10 @@
                      .screen_size = undefined,
                      .padding_extend = .{},
                      .min_contrast = options.config.min_contrast,
-+                    .scroll_offset_px = 0,
++                    .grid_offset_px = 0,
++                    .clip_top_px = 0,
++                    .clip_bottom_px = 0,
++                    .viewport_rows = .{ 0, 0 },
                      .cursor_pos = .{ std.math.maxInt(u16), std.math.maxInt(u16) },
                      .cursor_color = undefined,
                      .bg_color = .{
-@@ -1158,6 +1159,7 @@
+@@ -1158,6 +1162,9 @@
                  mouse: renderer.State.Mouse,
                  preedit: ?renderer.State.Preedit,
                  scrollbar: terminal.Scrollbar,
 +                scroll_offset_px: f32,
++                extra_top_rows: u16,
++                viewport_rows: u16,
                  overlay_features: []const Overlay.Feature,
              };
  
-@@ -1214,6 +1216,7 @@
+@@ -1200,7 +1207,11 @@
+                 }
+ 
+                 // Update our terminal state
+-                try self.terminal_state.update(self.alloc, state.terminal);
++                try self.terminal_state.update(
++                    self.alloc,
++                    state.terminal,
++                    if (state.smooth_scroll) 1 else 0,
++                );
+ 
+                 // If our terminal state is dirty at all we need to redo
+                 // the viewport search.
+@@ -1214,6 +1225,12 @@
                  // can be expensive) and also makes it so we don't need another
                  // cross-thread mailbox message within the IO path.
                  const scrollbar = state.terminal.screens.active.pages.scrollbar();
 +                const scroll_offset_px = state.scroll_offset_px;
++                // From the RENDER state (the snapshot), not `renderer.State`:
++                // the extras are a property of what was snapshotted. Read after
++                // `rebuildCells`, which is what refreshes it.
++                const extra_top_rows = self.terminal_state.extra_top;
++                const viewport_rows = self.terminal_state.rows;
  
                  // Get our preedit state
                  const preedit: ?renderer.State.Preedit = preedit: {
-@@ -1275,6 +1278,7 @@
+@@ -1275,6 +1292,9 @@
                      .mouse = state.mouse,
                      .preedit = preedit,
                      .scrollbar = scrollbar,
 +                    .scroll_offset_px = scroll_offset_px,
++                    .extra_top_rows = extra_top_rows,
++                    .viewport_rows = viewport_rows,
                      .overlay_features = overlay_features,
                  };
              };
-@@ -1386,6 +1390,41 @@
+@@ -1386,6 +1406,61 @@
                  }
  
                  // Update our background color
 +                // Sub-row scroll offset. Set per frame (not in
 +                // `updateScreenSizeUniforms`, which only runs on resize) and
 +                // uploaded by `drawFrame`'s `uniforms.sync`.
-+                self.uniforms.scroll_offset_px = critical.scroll_offset_px;
++                {
++                    const cell_h: f32 = @floatFromInt(self.grid_metrics.cell_height);
++                    // Buffer row 0 is `extra_top_rows` above the viewport, so
++                    // the grid starts that much higher; the scroll remainder
++                    // then slides it. One uniform carries both — the shaders
++                    // only ever need the total.
++                    self.uniforms.grid_offset_px =
++                        critical.scroll_offset_px -
++                        @as(f32, @floatFromInt(critical.extra_top_rows)) * cell_h;
++
++                    // The band the viewport actually occupies. `grid_padding`
++                    // is [top, right, bottom, left].
++                    const top = self.uniforms.grid_padding[0];
++                    self.uniforms.clip_top_px = top;
++                    self.uniforms.clip_bottom_px = top +
++                        @as(f32, @floatFromInt(critical.viewport_rows)) * cell_h;
++                    self.uniforms.viewport_rows = .{
++                        critical.extra_top_rows,
++                        critical.extra_top_rows + critical.viewport_rows - 1,
++                    };
++                }
 +
 +                // Shifting the grid opens a sliver at the edge it moved away
 +                // from, up to one cell tall. We snapshot exactly the viewport's
@@ -214,32 +264,98 @@
                  self.uniforms.bg_color = .{
                      self.terminal_state.colors.background.r,
                      self.terminal_state.colors.background.g,
+@@ -2321,12 +2396,12 @@
+             // }
+ 
+             const grid_size_diff =
+-                self.cells.size.rows != state.rows or
++                self.cells.size.rows != state.total_rows or
+                 self.cells.size.columns != state.cols;
+ 
+             if (grid_size_diff) {
+                 var new_size = self.cells.size;
+-                new_size.rows = state.rows;
++                new_size.rows = state.total_rows;
+                 new_size.columns = state.cols;
+                 try self.cells.resize(self.alloc, new_size);
+ 
+@@ -2374,7 +2449,7 @@
+             // the viewport is shorter than the cell contents buffer, we align
+             // the top of the viewport with the top of the contents buffer.
+             const row_len: usize = @min(
+-                state.rows,
++                state.total_rows,
+                 self.cells.size.rows,
+             );
+ 
+@@ -2636,7 +2711,11 @@
+                 .background, .@"extend-always" => {},
+ 
+                 // Apply heuristics for padding extension.
+-                .extend => if (y == 0) {
++                // `state.extra_top` rows precede the viewport and
++                // `state.extra_bottom` follow it, so the visible edges are not
++                // the buffer's edges. Ask about the row the user can actually
++                // see at each end.
++                .extend => if (y == state.extra_top) {
+                     self.uniforms.padding_extend.up = !rowNeverExtendBg(
+                         row,
+                         cells_raw,
+@@ -2644,7 +2723,7 @@
+                         &state.colors.palette,
+                         state.colors.background,
+                     );
+-                } else if (y == self.cells.size.rows - 1) {
++                } else if (y == state.extra_top + state.rows - 1) {
+                     self.uniforms.padding_extend.down = !rowNeverExtendBg(
+                         row,
+                         cells_raw,
 --- a/src/renderer/metal/shaders.zig
 +++ b/src/renderer/metal/shaders.zig
-@@ -219,6 +219,12 @@
+@@ -219,7 +219,29 @@
      /// The minimum contrast ratio for text. The contrast ratio is calculated
      /// according to the WCAG 2.0 spec.
      min_contrast: f32 align(4),
 +
-+    /// Sub-row scroll offset in pixels; positive shifts the grid DOWN.
-+    /// See `renderer.State.scroll_offset_px`. Must stay in the same position
-+    /// as its counterpart in shaders.metal — the two structs are matched by
-+    /// field order, not by name.
-+    scroll_offset_px: f32 align(4),
++    /// Vertical offset of the whole grid in pixels; positive draws it LOWER.
++    ///
++    /// Carries two things at once: the sub-row scroll remainder (see
++    /// `renderer.State.scroll_offset_px`) and, negatively, the height of the
++    /// rows snapshotted above the viewport — buffer row 0 is the row ABOVE the
++    /// viewport when `extra_top` is 1, so the grid has to start a cell higher
++    /// for the viewport's own first row to land at the top.
++    ///
++    /// Must stay in the same position as its counterpart in shaders.metal —
++    /// the two structs are matched by field order, not by name.
++    grid_offset_px: f32 align(4),
  
++    /// Viewport bounds in pixels. The extra rows would otherwise paint over
++    /// the window padding, so fragments outside this band are discarded.
++    clip_top_px: f32 align(4),
++    clip_bottom_px: f32 align(4),
++    /// First and last VIEWPORT row in grid space, i.e. `extra_top` and
++    /// `extra_top + rows - 1`. The padding fill clamps to these so it keeps
++    /// taking its colour from a row the user can actually see, rather than
++    /// from an extra row that is only there to slide in.
++    viewport_rows: [2]u16 align(4),
++
      /// The cursor position and color.
      cursor_pos: [2]u16 align(4),
+     cursor_color: [4]u8 align(4),
 --- a/src/renderer/shaders/shaders.metal
 +++ b/src/renderer/shaders/shaders.metal
-@@ -17,6 +17,7 @@
+@@ -17,6 +17,10 @@
    float4 grid_padding;
    uint8_t padding_extend;
    float min_contrast;
-+  float scroll_offset_px;
++  float grid_offset_px;
++  float clip_top_px;
++  float clip_bottom_px;
++  ushort2 viewport_rows;
    ushort2 cursor_pos;
    uchar4 cursor_color;
    uchar4 bg_color;
-@@ -453,7 +454,11 @@
+@@ -453,10 +457,22 @@
    constant Uniforms& uniforms [[buffer(1)]],
    constant uchar4 *cells [[buffer(2)]]
  ) {
@@ -247,27 +363,95 @@
 +  // Sub-row scroll: the grid is drawn `scroll_offset_px` lower than its row
 +  // boundary, so a given screen pixel maps to a cell that much EARLIER.
 +  float2 cell_rel = in.position.xy - uniforms.grid_padding.wx;
-+  cell_rel.y -= uniforms.scroll_offset_px;
++  cell_rel.y -= uniforms.grid_offset_px;
 +  int2 grid_pos = int2(floor(cell_rel / uniforms.cell_size));
  
    float4 bg = float4(0.0);
  
-@@ -561,6 +566,7 @@
++  // Whether this pixel is over the window padding rather than the viewport.
++  // The rows snapshotted beyond the viewport pass through here on their way in,
++  // and their colours must not be what gets painted: what belongs over the
++  // padding is the padding fill, which is the nearest VIEWPORT row extended
++  // outwards. Handled below, after x, so the two clamps compose.
++  bool above = in.position.y < uniforms.clip_top_px;
++  bool below = in.position.y >= uniforms.clip_bottom_px;
++
+   // Clamp x position, extends edge bg colors in to padding on sides.
+   if (grid_pos.x < 0) {
+     if (uniforms.padding_extend & EXTEND_LEFT) {
+@@ -469,6 +485,20 @@
+       grid_pos.x = uniforms.grid_size.x - 1;
+     } else {
+       return bg;
++    }
++  }
++
++  // Over the padding: take the viewport edge row, subject to the same
++  // padding_extend opt-in that governed this region before smooth scrolling
++  // existed. With no scroll offset showing this reproduces the old result
++  // exactly — the extra rows sit entirely outside the band and never paint.
++  if (above || below) {
++    if (above) {
++      if (!(uniforms.padding_extend & EXTEND_UP)) return bg;
++      grid_pos.y = uniforms.viewport_rows.x;
++    } else {
++      if (!(uniforms.padding_extend & EXTEND_DOWN)) return bg;
++      grid_pos.y = uniforms.viewport_rows.y;
+     }
+   }
+ 
+@@ -561,6 +591,7 @@
  ) {
    // Convert the grid x, y into world space x, y by accounting for cell size
    float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
-+  cell_pos.y += uniforms.scroll_offset_px;
++  cell_pos.y += uniforms.grid_offset_px;
  
    // We use a triangle strip with 4 vertices to render quads,
    // so we determine which corner of the cell this vertex is in
-@@ -821,6 +827,7 @@
+@@ -675,12 +706,21 @@
+   return out;
+ }
+ 
++// Clipped to the viewport band for the same reason as `cell_bg_fragment`: the
++// extra rows are snapshotted to slide in, not to paint over the padding.
+ fragment float4 cell_text_fragment(
+   CellTextVertexOut in [[stage_in]],
+   texture2d<float> textureGrayscale [[texture(0)]],
+   texture2d<float> textureColor [[texture(1)]],
+   constant Uniforms& uniforms [[buffer(1)]]
+ ) {
++  // See `cell_bg_fragment`: the rows snapshotted beyond the viewport must not
++  // paint over the window padding.
++  if (in.position.y < uniforms.clip_top_px ||
++      in.position.y >= uniforms.clip_bottom_px) {
++    discard_fragment();
++  }
++
+   constexpr sampler textureSampler(
+     coord::pixel,
+     address::clamp_to_edge,
+@@ -821,6 +861,7 @@
    // The position of our image starts at the top-left of the grid cell and
    // adds the source rect width/height components.
    float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
-+  image_pos.y += uniforms.scroll_offset_px;
++  image_pos.y += uniforms.grid_offset_px;
    image_pos += in.dest_size * corner;
  
    out.position =
+@@ -834,6 +875,13 @@
+   texture2d<float> image [[texture(0)]],
+   constant Uniforms& uniforms [[buffer(1)]]
+ ) {
++  // See `cell_bg_fragment`: the rows snapshotted beyond the viewport must not
++  // paint over the window padding.
++  if (in.position.y < uniforms.clip_top_px ||
++      in.position.y >= uniforms.clip_bottom_px) {
++    discard_fragment();
++  }
++
+   constexpr sampler textureSampler(
+     coord::pixel,
+     address::clamp_to_edge,
 --- a/src/config/Config.zig
 +++ b/src/config/Config.zig
 @@ -987,6 +987,14 @@
@@ -285,3 +469,454 @@
  
  /// The opacity level (opposite of transparency) of the background. A value of
  /// 1 is fully opaque and a value of 0 is fully transparent. A value less than 0
+--- a/src/terminal/render.zig
++++ b/src/terminal/render.zig
+@@ -58,13 +58,26 @@
+     rows: size.CellCountInt,
+     cols: size.CellCountInt,
+ 
++    /// Rows snapshotted beyond the viewport so smooth scrolling has something
++    /// to slide in: one above (`extra_top`) and one below, when they exist.
++    ///
++    /// `row_data` holds `total_rows` entries and `y = extra_top` is the
++    /// viewport's first row. At the ends of the scrollback the corresponding
++    /// extra is 0, because there is no row there to snapshot.
++    extra_top: size.CellCountInt = 0,
++    extra_bottom: size.CellCountInt = 0,
++
++    /// `rows + extra_top + extra_bottom` — the length of `row_data`.
++    total_rows: size.CellCountInt = 0,
++
+     /// The color state for the terminal.
+     colors: Colors,
+ 
+     /// Cursor state within the viewport.
+     cursor: Cursor,
+ 
+-    /// The rows (y=0 is top) of the viewport. Guaranteed to be `rows` length.
++    /// The snapshotted rows, `total_rows` long. y=0 is the first row —
++    /// which is the row ABOVE the viewport when `extra_top` is 1.
+     ///
+     /// This is a MultiArrayList because only the update cares about
+     /// the allocators. Callers care about all the other properties, and
+@@ -259,10 +272,15 @@
+     ///
+     /// This will reset the terminal dirty state since it is consumed
+     /// by this render state update.
++    /// `max_extra` is how many rows beyond the viewport may be snapshotted at
++    /// each end — 1 when smooth scrolling is on, 0 otherwise. At 0 everything
++    /// below reduces to snapshotting exactly the viewport, which is what this
++    /// did before smooth scrolling existed.
+     pub fn update(
+         self: *RenderState,
+         alloc: Allocator,
+         t: *Terminal,
++        max_extra: size.CellCountInt,
+     ) Allocator.Error!void {
+         const s: *Screen = t.screens.active;
+         const viewport_pin = s.pages.getTopLeft(.viewport);
+@@ -287,13 +305,29 @@
+                 if (v > 0) break :redraw true;
+             }
+ 
+-            // If our dimensions changed, we do a full rebuild.
++            // If our dimensions changed, we do a full rebuild. `rows` stays
++            // the VIEWPORT height here — comparing the padded total would also
++            // fire whenever an extra row appeared or vanished, which is a
++            // different question and is handled just below.
+             if (self.rows != s.pages.rows or
+                 self.cols != s.pages.cols)
+             {
+                 break :redraw true;
+             }
+ 
++            // Gaining or losing an extra row renumbers every slot in
++            // `row_data`, so the previous contents no longer describe the same
++            // rows. Happens at the ends of the scrollback.
++            {
++                const b = s.pages.scrollbar();
++                const et: size.CellCountInt = if (max_extra > 0 and b.offset > 0) 1 else 0;
++                const eb: size.CellCountInt =
++                    if (max_extra > 0 and b.offset + b.len < b.total) 1 else 0;
++                if (self.extra_top != et or self.extra_bottom != eb) {
++                    break :redraw true;
++                }
++            }
++
+             // If our viewport pin changed, we do a full rebuild.
+             if (self.viewport_pin) |old| {
+                 if (!old.eql(viewport_pin)) break :redraw true;
+@@ -302,8 +336,21 @@
+             break :redraw false;
+         };
+ 
++        // How many rows beyond the viewport we can snapshot. Asked of the
++        // scrollbar because it already answers "what is above and below the
++        // viewport" in rows: `offset` is the count above, and `total - offset
++        // - len` the count below.
++        const bar = s.pages.scrollbar();
++        const extra_top: size.CellCountInt =
++            if (max_extra > 0 and bar.offset > 0) 1 else 0;
++        const extra_bottom: size.CellCountInt =
++            if (max_extra > 0 and bar.offset + bar.len < bar.total) 1 else 0;
++
+         // Always set our cheap fields, its more expensive to compare
+         self.rows = s.pages.rows;
++        self.extra_top = extra_top;
++        self.extra_bottom = extra_bottom;
++        self.total_rows = s.pages.rows + extra_top + extra_bottom;
+         self.cols = s.pages.cols;
+         self.viewport_pin = viewport_pin;
+         self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
+@@ -341,19 +388,19 @@
+         // Ensure our row length is exactly our height, freeing or allocating
+         // data as necessary. In most cases we'll have a perfectly matching
+         // size.
+-        if (self.row_data.len != self.rows) {
++        if (self.row_data.len != self.total_rows) {
+             @branchHint(.unlikely);
+ 
+-            if (self.row_data.len < self.rows) {
++            if (self.row_data.len < self.total_rows) {
+                 // Resize our rows to the desired length, marking any added
+                 // values undefined.
+                 const old_len = self.row_data.len;
+-                try self.row_data.resize(alloc, self.rows);
++                try self.row_data.resize(alloc, self.total_rows);
+ 
+                 // Initialize all our values. Its faster to use slice() + set()
+                 // because appendAssumeCapacity does this multiple times.
+                 var row_data = self.row_data.slice();
+-                for (old_len..self.rows) |y| {
++                for (old_len..self.total_rows) |y| {
+                     row_data.set(y, .{
+                         .arena = .{},
+                         .pin = undefined,
+@@ -367,14 +414,14 @@
+             } else {
+                 const row_data = self.row_data.slice();
+                 for (
+-                    row_data.items(.arena)[self.rows..],
+-                    row_data.items(.cells)[self.rows..],
++                    row_data.items(.arena)[self.total_rows..],
++                    row_data.items(.cells)[self.total_rows..],
+                 ) |state, *cell| {
+                     var arena: ArenaAllocator = state.promote(alloc);
+                     arena.deinit();
+                     cell.deinit(alloc);
+                 }
+-                self.row_data.shrinkRetainingCapacity(self.rows);
++                self.row_data.shrinkRetainingCapacity(self.total_rows);
+             }
+         }
+ 
+@@ -393,14 +440,20 @@
+         var last_dirty_page: ?*page.Page = null;
+ 
+         // Go through and setup our rows.
++        // Start `extra_top` rows above the viewport. Screen space, because
++        // that is the one coordinate space that can address a row the viewport
++        // doesn't contain — `bar.offset` IS the viewport's first row in it.
+         var row_it = s.pages.rowIterator(
+             .right_down,
+-            .{ .viewport = .{} },
++            .{ .screen = .{ .y = @intCast(bar.offset - extra_top) } },
+             null,
+         );
+         var y: size.CellCountInt = 0;
+         var any_dirty: bool = false;
+         while (row_it.next()) |row_pin| : (y = y + 1) {
++            // A screen-space iterator runs to the end of the scrollback, not to
++            // the end of the viewport, so we stop ourselves.
++            if (y >= self.total_rows) break;
+             // Find our cursor if we haven't found it yet. We do this even
+             // if the row is not dirty because the cursor is unrelated.
+             if (self.cursor.viewport == null and
+@@ -893,7 +946,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ }
+ 
+ test "basic text" {
+@@ -912,7 +965,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Verify we have the right number of rows
+     const row_data = state.row_data.slice();
+@@ -950,7 +1003,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Verify we have the right number of rows
+     const row_data = state.row_data.slice();
+@@ -995,7 +1048,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Verify we have the right number of rows
+     const row_data = state.row_data.slice();
+@@ -1043,7 +1096,7 @@
+     defer state.deinit(alloc);
+ 
+     // Initial update
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expectEqual(0, state.cursor.active.x);
+     try testing.expectEqual(0, state.cursor.active.y);
+     try testing.expectEqual(0, state.cursor.viewport.?.x);
+@@ -1053,14 +1106,14 @@
+ 
+     // Set a style on the cursor
+     try s.nextSlice("\x1b[1m"); // Bold
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expect(!state.cursor.style.default());
+     try testing.expect(state.cursor.style.flags.bold);
+     try s.nextSlice("\x1b[0m"); // Reset style
+ 
+     // Move cursor to 2,1
+     try s.nextSlice("\x1b[2;3H");
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expectEqual(2, state.cursor.active.x);
+     try testing.expectEqual(1, state.cursor.active.y);
+     try testing.expectEqual(2, state.cursor.viewport.?.x);
+@@ -1085,7 +1138,7 @@
+     defer state.deinit(alloc);
+ 
+     // Initial update
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expectEqual(0, state.cursor.active.x);
+     try testing.expectEqual(1, state.cursor.active.y);
+     try testing.expectEqual(0, state.cursor.viewport.?.x);
+@@ -1093,12 +1146,64 @@
+ 
+     // Scroll the viewport
+     t.scrollViewport(.top);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Set a style on the cursor
+     try testing.expectEqual(0, state.cursor.active.x);
+     try testing.expectEqual(1, state.cursor.active.y);
+     try testing.expect(state.cursor.viewport == null);
++}
++
++// The extra rows exist so smooth scrolling has something to slide in. Two
++// things have to hold and neither is visible from the app side: `max_extra`
++// of 0 must reproduce exactly what this did before the feature existed, and
++// the extras must renumber `row_data` — a cursor reported at the wrong `y`
++// would draw a row off, mid-scroll only.
++test "extra rows beyond the viewport" {
++    const testing = std.testing;
++    const alloc = testing.allocator;
++
++    var t = try Terminal.init(alloc, .{ .cols = 10, .rows = 5 });
++    defer t.deinit(alloc);
++
++    // Ten lines into a five-row screen, so there is scrollback above and the
++    // viewport is pinned to the bottom.
++    var s = t.vtStream();
++    defer s.deinit();
++    for (0..10) |_| try s.nextSlice("A\r\n");
++
++    var state: RenderState = .empty;
++    defer state.deinit(alloc);
++
++    // Off: exactly the viewport, as upstream.
++    try state.update(alloc, &t, 0);
++    try testing.expectEqual(0, state.extra_top);
++    try testing.expectEqual(0, state.extra_bottom);
++    try testing.expectEqual(5, state.total_rows);
++    try testing.expectEqual(5, state.row_data.len);
++    const cursor_y_off = state.cursor.viewport.?.y;
++
++    // On, at the bottom: a row above to slide in, nothing below.
++    try state.update(alloc, &t, 1);
++    try testing.expectEqual(1, state.extra_top);
++    try testing.expectEqual(0, state.extra_bottom);
++    try testing.expectEqual(6, state.total_rows);
++    try testing.expectEqual(6, state.row_data.len);
++    // The cursor moves down one slot by exactly the extras added above it.
++    try testing.expectEqual(cursor_y_off + 1, state.cursor.viewport.?.y);
++
++    // At the very top there is nothing above to slide in, but there is below.
++    t.scrollViewport(.top);
++    try state.update(alloc, &t, 1);
++    try testing.expectEqual(0, state.extra_top);
++    try testing.expectEqual(1, state.extra_bottom);
++    try testing.expectEqual(6, state.total_rows);
++
++    // And back off again, from a state that had extras: `row_data` has to
++    // shrink rather than keep stale rows nothing will overwrite.
++    try state.update(alloc, &t, 0);
++    try testing.expectEqual(5, state.total_rows);
++    try testing.expectEqual(5, state.row_data.len);
+ }
+ 
+ test "dirty state" {
+@@ -1118,7 +1223,7 @@
+     defer state.deinit(alloc);
+ 
+     // First update should trigger redraw due to resize
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expectEqual(.full, state.dirty);
+ 
+     // Reset dirty flag and dirty rows
+@@ -1130,7 +1235,7 @@
+     }
+ 
+     // Second update with no changes - no dirty rows
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expectEqual(.false, state.dirty);
+     {
+         const row_data = state.row_data.slice();
+@@ -1140,7 +1245,7 @@
+ 
+     // Write to first line
+     try s.nextSlice("A");
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expectEqual(.partial, state.dirty);
+     {
+         const row_data = state.row_data.slice();
+@@ -1167,11 +1272,11 @@
+     defer state.deinit(alloc);
+ 
+     // Default colors
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Change cursor color
+     try s.nextSlice("\x1b]12;#FF0000\x07");
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     const c = state.colors.cursor.?;
+     try testing.expectEqual(0xFF, c.r);
+@@ -1180,7 +1285,7 @@
+ 
+     // Change palette color 0 to White
+     try s.nextSlice("\x1b]4;0;#FFFFFF\x07");
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     const p0 = state.colors.palette[0];
+     try testing.expectEqual(0xFF, p0.r);
+     try testing.expectEqual(0xFF, p0.g);
+@@ -1206,7 +1311,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     const row_data = state.row_data.slice();
+     const sels = row_data.items(.selection);
+@@ -1216,7 +1321,7 @@
+ 
+     // Clear the selection
+     try screen.select(null);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+     try testing.expectEqual(null, sels[0]);
+     try testing.expectEqual(null, sels[1]);
+     try testing.expectEqual(null, sels[2]);
+@@ -1241,7 +1346,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     const row_data = state.row_data.slice();
+     const sels = row_data.items(.selection);
+@@ -1276,7 +1381,7 @@
+ 
+     // Create a hyperlink
+     try s.nextSlice("\x1b]8;;http://example.com\x1b\\LINK\x1b]8;;\x1b\\");
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Query link at 0,0
+     var cells = try state.linkCells(alloc, .{ .x = 0, .y = 0 });
+@@ -1310,7 +1415,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     var w = std.Io.Writer.Allocating.init(alloc);
+     defer w.deinit();
+@@ -1354,7 +1459,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     const expected_viewport_y: usize = viewport_rows - tail_rows;
+     // BUG: This crashes without the fix
+@@ -1381,7 +1486,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Row out of bound
+     {
+@@ -1420,7 +1525,7 @@
+ 
+     var state: RenderState = .empty;
+     defer state.deinit(alloc);
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Reset dirty state
+     state.dirty = .false;
+@@ -1453,7 +1558,7 @@
+     // Write to row 0 to make it dirty
+     try s.nextSlice("\x1b[H"); // Move to home
+     try s.nextSlice("X");
+-    try state.update(alloc, &t);
++    try state.update(alloc, &t, 0);
+ 
+     // Verify the highlight was reset on the dirty row
+     {
+--- a/src/benchmark/ScreenClone.zig
++++ b/src/benchmark/ScreenClone.zig
+@@ -174,7 +174,7 @@
+     // slowdown.
+     const alloc = self.terminal.screens.active.alloc;
+     var state: terminalpkg.RenderState = .empty;
+-    state.update(alloc, &self.terminal) catch |err| {
++    state.update(alloc, &self.terminal, 0) catch |err| {
+         log.warn("error cloning screen err={}", .{err});
+         return error.BenchmarkFailed;
+     };
+@@ -184,7 +184,7 @@
+     for (0..1000) |_| {
+         // Forces a full rebuild because it thinks our screen changed
+         state.screen = .alternate;
+-        state.update(alloc, &self.terminal) catch |err| {
++        state.update(alloc, &self.terminal, 0) catch |err| {
+             log.warn("error cloning screen err={}", .{err});
+             return error.BenchmarkFailed;
+         };
