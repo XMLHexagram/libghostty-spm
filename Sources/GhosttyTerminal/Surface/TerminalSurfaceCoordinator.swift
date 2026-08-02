@@ -7,7 +7,6 @@
 
 import Foundation
 import GhosttyKit
-import MSDisplayLink
 
 /// Shared terminal state and logic used by both UIKit and AppKit views.
 ///
@@ -41,6 +40,10 @@ final class TerminalSurfaceCoordinator {
 
     var isAttached: () -> Bool = { false }
     var scaleFactor: () -> Double = { 2.0 }
+    /// The view the frame clock should follow. Asked for at start time rather
+    /// than stored, so the coordinator owns no reference back to its view — and
+    /// so the link re-times itself against whatever screen the view is on now.
+    var displayLinkHost: () -> PlatformViewForDisplayLink? = { nil }
     var viewSize: () -> (width: Double, height: Double) = { (0, 0) }
     var platformSetup: ((inout ghostty_surface_config_s) -> Void)?
     var onMetricsUpdate: (() -> Void)?
@@ -61,6 +64,8 @@ final class TerminalSurfaceCoordinator {
     /// `contentsScale` and `frame` on sublayers after each render,
     /// correcting any drift introduced by ghostty within a single frame.
     var onPostRender: (() -> Void)?
+    /// Fires once per second with this surface's measured frame rate.
+    var onFrameStats: ((TerminalFrameStats) -> Void)?
 
     private var lastMetrics: TerminalViewportMetrics?
 
@@ -89,8 +94,19 @@ final class TerminalSurfaceCoordinator {
 
     // MARK: - Display Link
 
-    private var displayLink: DisplayLink?
-    private let displayLinkTarget = DisplayLinkTarget()
+    private var displayLink: TerminalDisplayLink?
+
+    /// Frames-per-second ceiling, or nil for the display's own rate. Applied
+    /// live: this is a preference about how hard to work, not part of the
+    /// surface's identity, so it must never reach `TerminalSurfaceOptions` —
+    /// changing that rebuilds the surface, and rebuilding a surface to change a
+    /// frame rate would restart the shell under it.
+    var preferredFrameRate: Int? {
+        didSet {
+            guard preferredFrameRate != oldValue else { return }
+            displayLink?.preferredFrameRate = preferredFrameRate
+        }
+    }
 
     init() {
         bridge.onCellSizeChange = { [weak self] width, height in
@@ -101,16 +117,19 @@ final class TerminalSurfaceCoordinator {
     func startDisplayLink() {
         guard displayLink == nil else { return }
         TerminalDebugLog.log(.lifecycle, "display link start")
-        displayLinkTarget.core = self
-        let link = DisplayLink()
-        link.delegatingObject(displayLinkTarget)
+        let link = TerminalDisplayLink(
+            host: { [weak self] in self?.displayLinkHost() },
+            onTick: { [weak self] in self?.tick() }
+        )
+        link.preferredFrameRate = preferredFrameRate
+        link.start()
         displayLink = link
     }
 
     func stopDisplayLink() {
         TerminalDebugLog.log(.lifecycle, "display link stop")
+        displayLink?.stop()
         displayLink = nil
-        displayLinkTarget.core = nil
     }
 
     // MARK: - Surface Lifecycle
@@ -278,8 +297,63 @@ final class TerminalSurfaceCoordinator {
 
     // MARK: - Frame Rendering
 
+    // MARK: Frame instrumentation
+    //
+    // Answers "is this surface actually hitting the display's refresh rate?"
+    // with counted frames rather than an impression. The display link fires at
+    // the refresh rate whether or not we manage to draw, so ticks are the
+    // denominator and completed draws the numerator; the gap is `dropped`,
+    // which is the interesting number — a frame is dropped when the PREVIOUS
+    // draw is still in flight, i.e. the GPU submit is not keeping up.
+    //
+    // Costs a few integer adds per frame and one log line per second, only
+    // while the `.render` debug category is on.
+    private var fpsWindowStart: UInt64 = 0
+    private var fpsTicks = 0
+    private var fpsDraws = 0
+    private var fpsDropped = 0
+    private var fpsDrawNanos: UInt64 = 0
+
+    private func recordFrameStats() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if fpsWindowStart == 0 { fpsWindowStart = now; return }
+        let elapsed = now - fpsWindowStart
+        guard elapsed >= 1_000_000_000 else { return }
+        let seconds = Double(elapsed) / 1_000_000_000
+        let drawn = fpsDraws
+        let avgMs = drawn > 0
+            ? Double(fpsDrawNanos) / Double(drawn) / 1_000_000
+            : 0
+        // `.metrics`, not `.render`: the render category logs a line per tick,
+        // which at 120 Hz buries a once-a-second summary in its own noise.
+        let stats = TerminalFrameStats(
+            drawnPerSecond: Double(drawn) / seconds,
+            ticksPerSecond: Double(fpsTicks) / seconds,
+            dropped: fpsDropped,
+            averageDrawMilliseconds: avgMs
+        )
+        onFrameStats?(stats)
+        TerminalDebugLog.log(
+            .metrics,
+            String(
+                format: "fps drawn=%.1f/s ticks=%.1f/s dropped=%d avgDraw=%.2fms",
+                Double(drawn) / seconds,
+                Double(fpsTicks) / seconds,
+                fpsDropped,
+                avgMs
+            )
+        )
+        fpsWindowStart = now
+        fpsTicks = 0
+        fpsDraws = 0
+        fpsDropped = 0
+        fpsDrawNanos = 0
+    }
+
     func tick() {
         TerminalDebugLog.log(.render, "tick")
+        fpsTicks += 1
+        recordFrameStats()
         // App + surface bookkeeping stays on the main actor: `ghostty_app_tick`
         // drains the process-wide app mailbox (shared across ALL surfaces) and
         // `refresh` is a cheap dirty-state update. Only the expensive,
@@ -289,8 +363,13 @@ final class TerminalSurfaceCoordinator {
 
         // Drop this frame if the previous draw is still running — never let
         // draws pile up on the render queue.
-        guard !drawInFlight, let raw = surface?.rawValue else { return }
+        guard !drawInFlight, let raw = surface?.rawValue else {
+            // Only a real drop: no surface at all isn't a dropped frame.
+            if drawInFlight { fpsDropped += 1 }
+            return
+        }
         drawInFlight = true
+        let drawStart = DispatchTime.now().uptimeNanoseconds
         let handle = RawSurfaceHandle(surface: raw)
         renderQueue.async { [weak self] in
             // `ghostty_surface_draw` is a plain C entry point safe to call off
@@ -301,8 +380,8 @@ final class TerminalSurfaceCoordinator {
             // Metal objects (drawables, command buffers). On the main thread
             // the run loop drains these each frame; a bare GCD serial queue
             // does not drain per block, so without this the objects pile up.
-            // (The main-thread path did this too — see MSDisplayLink's
-            // `displayLinkCallback`.)
+            // (The display link's own callback does this too — see
+            // `TerminalDisplayLink`.)
             autoreleasepool {
                 ghostty_surface_draw(handle.surface)
             }
@@ -312,6 +391,8 @@ final class TerminalSurfaceCoordinator {
                 // CoreAnimation state — back on the main actor after the draw.
                 self.onPostRender?()
                 self.drawInFlight = false
+                self.fpsDraws += 1
+                self.fpsDrawNanos += DispatchTime.now().uptimeNanoseconds - drawStart
             }
         }
     }
@@ -404,17 +485,6 @@ private struct RawSurfaceHandle: @unchecked Sendable {
     let surface: ghostty_surface_t
 }
 
-// MARK: - DisplayLinkTarget
-
 /// Bridges the `nonisolated` display link callback back to `@MainActor`
 /// TerminalSurfaceCoordinator. Stored as a separate object because `TerminalSurfaceCoordinator` itself
 /// is `@MainActor` and cannot directly conform to `nonisolated` protocol.
-private final class DisplayLinkTarget: DisplayLinkDelegate, @unchecked Sendable {
-    @MainActor var core: TerminalSurfaceCoordinator?
-
-    nonisolated func synchronization(context _: DisplayLinkCallbackContext) {
-        terminalRunOnMain { [weak self] in
-            self?.core?.tick()
-        }
-    }
-}

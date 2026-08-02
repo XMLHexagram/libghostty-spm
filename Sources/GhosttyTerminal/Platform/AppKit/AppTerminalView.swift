@@ -30,6 +30,19 @@
             set { core.configuration = newValue }
         }
 
+        /// Frames-per-second ceiling for this surface, or nil for the display's
+        /// own rate.
+        ///
+        /// Deliberately not part of `configuration`: that struct is the
+        /// surface's identity and setting it rebuilds the surface, which for an
+        /// exec backend means restarting the shell. A frame rate is a statement
+        /// about how hard to work, and applies to the link that is already
+        /// running.
+        public var preferredFrameRate: Int? {
+            get { core.preferredFrameRate }
+            set { core.preferredFrameRate = newValue }
+        }
+
         public var surface: TerminalSurface? {
             core.surface
         }
@@ -214,6 +227,7 @@
             registerForDraggedTypes([.fileURL])
 
             core.isAttached = { [weak self] in self?.window != nil }
+            core.displayLinkHost = { [weak self] in self }
             core.scaleFactor = { [weak self] in
                 Double(
                     self?.window?.backingScaleFactor
@@ -239,7 +253,16 @@
             core.onPostRender = { [weak self] in
                 self?.enforceMetalLayerScale()
             }
+            core.onFrameStats = { [weak self] stats in
+                self?.onFrameStats?(stats)
+            }
         }
+
+        /// Measured frame rate for this surface, once per second.
+        ///
+        /// Always computed (a few integer adds per frame); a host that doesn't
+        /// set this just never hears about it.
+        public var onFrameStats: ((TerminalFrameStats) -> Void)?
 
         override public func layout() {
             super.layout()

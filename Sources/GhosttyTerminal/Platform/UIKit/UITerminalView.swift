@@ -89,6 +89,7 @@
             updateDisplayScale()
 
             core.isAttached = { [weak self] in self?.window != nil }
+            core.displayLinkHost = { [weak self] in self }
             core.scaleFactor = { [weak self] in
                 Double(self?.resolvedDisplayScale() ?? UIScreen.main.nativeScale)
             }
