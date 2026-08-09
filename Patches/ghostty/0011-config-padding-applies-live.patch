@@ -1,0 +1,44 @@
+--- a/src/Surface.zig
++++ b/src/Surface.zig
+@@ -1777,6 +1777,41 @@
+         log.warn("failed to notify renderer of config change err={}", .{err});
+     };
+ 
++    // Padding is DERIVED from the config but STORED in `size`, and `size` is
++    // only recomputed by `resize` — which `sizeCallback` refuses to call when
++    // the screen size is unchanged. Changing only `window-padding-*` changes no
++    // screen size, so without this the new value reaches `self.config` and then
++    // lands nowhere: the grid keeps the inset it was born with until the surface
++    // is recreated.
++    //
++    // Recomputed here rather than in `resize` because this is the one path where
++    // the config can move without the geometry that usually carries it.
++    padding: {
++        const content_scale = self.rt_surface.getContentScale() catch |err| {
++            log.warn("failed to read content scale for padding err={}", .{err});
++            break :padding;
++        };
++        const x_dpi = content_scale.x * font.face.default_dpi;
++        const y_dpi = content_scale.y * font.face.default_dpi;
++        const explicit: rendererpkg.Padding = self.config.scaledPadding(x_dpi, y_dpi);
++
++        const previous = self.size.padding;
++        if (self.config.window_padding_balance) {
++            self.size.balancePadding(explicit);
++        } else {
++            self.size.padding = explicit;
++        }
++        if (std.meta.eql(previous, self.size.padding)) break :padding;
++
++        // The grid changed shape, so the child has to hear about it — the same
++        // message `resize` sends, and what makes a new column count reach the
++        // pty rather than only the renderer.
++        self.queueIo(.{ .resize = self.size }, .unlocked);
++        self.queueRender() catch |err| {
++            log.warn("failed to notify renderer of padding change err={}", .{err});
++        };
++    }
++
+     // If we have a title set then we update our window to have the
+     // newly configured title.
+     if (config.title) |title| _ = try self.rt_app.performAction(
