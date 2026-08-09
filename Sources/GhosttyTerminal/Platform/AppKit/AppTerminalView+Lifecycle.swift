@@ -54,6 +54,9 @@
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            // Before anything reads it: the cache may have gone stale while we
+            // were out of the hierarchy. See `resyncFirstResponderCache`.
+            resyncFirstResponderCache()
             if window != nil {
                 // If a surface already exists (we were detached then
                 // re-attached, e.g. SwiftUI tree restructure for a split
@@ -98,6 +101,38 @@
                 core.stopDisplayLink()
                 NotificationCenter.default.removeObserver(self)
             }
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            // A re-parent WITHIN one window doesn't change `window`, so
+            // `viewDidMoveToWindow` never fires for it. Covered here so there is
+            // no hierarchy move the cache can survive incorrectly.
+            resyncFirstResponderCache()
+        }
+
+        /// Re-read first-responder status from the window, which is the only
+        /// authority once we are outside `becomeFirstResponder` /
+        /// `resignFirstResponder`.
+        ///
+        /// **Why the cache cannot be trusted across a hierarchy move.** MEASURED:
+        /// when a view that holds first responder is removed from its superview,
+        /// AppKit silently points the window's `firstResponder` back at the
+        /// window and **never sends `resignFirstResponder`**. So the flag those
+        /// two handlers maintain stays `true` for the rest of the view's life.
+        ///
+        /// That is not cosmetic here. `reconcileCursorFocus` ORs this flag with
+        /// the sticky hint, so a detached-then-readopted pane reports itself
+        /// focused to ghostty alongside the pane that really has focus — two
+        /// blinking cursors. A host that re-parents a cached surface to preserve
+        /// scrollback across a split (the whole reason the surface outlives the
+        /// view tree) therefore leaks one extra blinking cursor per split.
+        ///
+        /// Deliberately a re-read rather than an unconditional clear: a view can
+        /// also be re-parented while it legitimately still holds first responder,
+        /// and clearing would then be the same bug in the other direction.
+        private func resyncFirstResponderCache() {
+            isTerminalFirstResponder = (window?.firstResponder === self)
         }
 
         @objc internal func windowDidBecomeKey(_: Notification) {
