@@ -22,8 +22,8 @@ import PackageDescription
 // change here.
 let libghosttyArch = ProcessInfo.processInfo.environment["LIBGHOSTTY_ARCH"] ?? "arm64"
 let libghosttyBinary: (url: String, checksum: String) = libghosttyArch == "x86_64"
-    ? ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.4.0/GhosttyKit-x86_64.xcframework.zip", "9327cedbd7d9614b33b106e52773d2c32dab4562aa9044fce052bd321b266456")
-    : ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.4.0/GhosttyKit-arm64.xcframework.zip", "a74bca8cc85dafad96ad6319e25d12dc80f08f434629920668f7d82056045816")
+    ? ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.5.0/GhosttyKit-x86_64.xcframework.zip", "48d7c9979a017a839c82db0ce75f5b08c559ad44bad9aa6849b5973b457a3e10")
+    : ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.5.0/GhosttyKit-arm64.xcframework.zip", "db198eca697aa5519dc3b61eea9eef7e0d72af2b410fcb609e46e774b7fb13f7")
 
 let package = Package(
     name: "GhosttyKit",
