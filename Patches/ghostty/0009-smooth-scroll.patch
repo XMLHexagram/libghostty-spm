@@ -519,7 +519,7 @@
      ///
      /// This is a MultiArrayList because only the update cares about
      /// the allocators. Callers care about all the other properties, and
-@@ -259,10 +272,15 @@
+@@ -259,13 +272,40 @@
      ///
      /// This will reset the terminal dirty state since it is consumed
      /// by this render state update.
@@ -535,7 +535,32 @@
      ) Allocator.Error!void {
          const s: *Screen = t.screens.active;
          const viewport_pin = s.pages.getTopLeft(.viewport);
-@@ -287,13 +305,29 @@
++
++        // The rows just outside the viewport, asked of the PAGE LIST.
++        //
++        // This used to ask `s.pages.scrollbar()`, which reads like the right
++        // question — it already answers "how many rows are above and below the
++        // viewport". It is not. `scrollbar()` is a value shaped for the
++        // scrollbar UI, and on the ALTERNATE screen — `explicit_max_size == 0`,
++        // set in `Terminal.switchScreen` — it returns `offset = 0`
++        // unconditionally and on purpose, to hide the rows page allocation
++        // always leaves above the active area. Rendering then began at screen
++        // row 0, above the active area by exactly that slack, so a full-screen
++        // TUI drew stale rows and put its cursor below the visible area — from
++        // the moment the alternate screen first scrolled, which is the moment
++        // output passes one screen. A pin cannot be wrong about where it is.
++        //
++        // `down(rows)` is the row after the viewport's last: the viewport
++        // occupies `viewport_pin + 0 .. + rows - 1`.
++        const above: ?PageList.Pin = if (max_extra > 0) viewport_pin.up(1) else null;
++        const below: ?PageList.Pin = if (max_extra > 0) viewport_pin.down(s.pages.rows) else null;
++        const extra_top: size.CellCountInt = if (above != null) 1 else 0;
++        const extra_bottom: size.CellCountInt = if (below != null) 1 else 0;
++
+         const redraw = redraw: {
+             // If our screen key changed, we need to do a full rebuild
+             // because our render state is viewport-specific.
+@@ -287,13 +327,25 @@
                  if (v > 0) break :redraw true;
              }
  
@@ -553,33 +578,17 @@
 +            // Gaining or losing an extra row renumbers every slot in
 +            // `row_data`, so the previous contents no longer describe the same
 +            // rows. Happens at the ends of the scrollback.
++            if (self.extra_top != extra_top or
++                self.extra_bottom != extra_bottom)
 +            {
-+                const b = s.pages.scrollbar();
-+                const et: size.CellCountInt = if (max_extra > 0 and b.offset > 0) 1 else 0;
-+                const eb: size.CellCountInt =
-+                    if (max_extra > 0 and b.offset + b.len < b.total) 1 else 0;
-+                if (self.extra_top != et or self.extra_bottom != eb) {
-+                    break :redraw true;
-+                }
++                break :redraw true;
 +            }
 +
              // If our viewport pin changed, we do a full rebuild.
              if (self.viewport_pin) |old| {
                  if (!old.eql(viewport_pin)) break :redraw true;
-@@ -302,8 +336,21 @@
-             break :redraw false;
-         };
+@@ -304,6 +356,9 @@
  
-+        // How many rows beyond the viewport we can snapshot. Asked of the
-+        // scrollbar because it already answers "what is above and below the
-+        // viewport" in rows: `offset` is the count above, and `total - offset
-+        // - len` the count below.
-+        const bar = s.pages.scrollbar();
-+        const extra_top: size.CellCountInt =
-+            if (max_extra > 0 and bar.offset > 0) 1 else 0;
-+        const extra_bottom: size.CellCountInt =
-+            if (max_extra > 0 and bar.offset + bar.len < bar.total) 1 else 0;
-+
          // Always set our cheap fields, its more expensive to compare
          self.rows = s.pages.rows;
 +        self.extra_top = extra_top;
@@ -588,7 +597,7 @@
          self.cols = s.pages.cols;
          self.viewport_pin = viewport_pin;
          self.cursor.active = .{ .x = s.cursor.x, .y = s.cursor.y };
-@@ -341,19 +388,19 @@
+@@ -341,19 +396,19 @@
          // Ensure our row length is exactly our height, freeing or allocating
          // data as necessary. In most cases we'll have a perfectly matching
          // size.
@@ -612,7 +621,7 @@
                      row_data.set(y, .{
                          .arena = .{},
                          .pin = undefined,
-@@ -367,14 +414,14 @@
+@@ -367,14 +422,14 @@
              } else {
                  const row_data = self.row_data.slice();
                  for (
@@ -630,29 +639,29 @@
              }
          }
  
-@@ -393,14 +440,20 @@
+@@ -392,15 +447,15 @@
+         // more quickly do the full-page dirty check.
          var last_dirty_page: ?*page.Page = null;
  
-         // Go through and setup our rows.
-+        // Start `extra_top` rows above the viewport. Screen space, because
-+        // that is the one coordinate space that can address a row the viewport
-+        // doesn't contain — `bar.offset` IS the viewport's first row in it.
-         var row_it = s.pages.rowIterator(
-             .right_down,
+-        // Go through and setup our rows.
+-        var row_it = s.pages.rowIterator(
+-            .right_down,
 -            .{ .viewport = .{} },
-+            .{ .screen = .{ .y = @intCast(bar.offset - extra_top) } },
-             null,
-         );
+-            null,
+-        );
++        // Go through and setup our rows, starting at the extra row above the
++        // viewport when there is one to snapshot.
++        var row_it = (above orelse viewport_pin).rowIterator(.right_down, null);
          var y: size.CellCountInt = 0;
          var any_dirty: bool = false;
          while (row_it.next()) |row_pin| : (y = y + 1) {
-+            // A screen-space iterator runs to the end of the scrollback, not to
-+            // the end of the viewport, so we stop ourselves.
++            // The iterator has no bottom limit — it runs to the end of the
++            // scrollback — so we stop ourselves at the last row we snapshot.
 +            if (y >= self.total_rows) break;
              // Find our cursor if we haven't found it yet. We do this even
              // if the row is not dirty because the cursor is unrelated.
              if (self.cursor.viewport == null and
-@@ -816,14 +869,19 @@
+@@ -816,14 +871,19 @@
          const row_pins = row_slice.items(.pin);
          const row_cells = row_slice.items(.cells);
  
@@ -674,7 +683,7 @@
          const link_page: *page.Page = &link_pin.node.data;
          const link = link: {
              const rac = link_page.getRowAndCell(
-@@ -893,7 +951,7 @@
+@@ -893,7 +953,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -683,7 +692,7 @@
  }
  
  test "basic text" {
-@@ -912,7 +970,7 @@
+@@ -912,7 +972,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -692,7 +701,7 @@
  
      // Verify we have the right number of rows
      const row_data = state.row_data.slice();
-@@ -950,7 +1008,7 @@
+@@ -950,7 +1010,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -701,7 +710,7 @@
  
      // Verify we have the right number of rows
      const row_data = state.row_data.slice();
-@@ -995,7 +1053,7 @@
+@@ -995,7 +1055,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -710,7 +719,7 @@
  
      // Verify we have the right number of rows
      const row_data = state.row_data.slice();
-@@ -1043,7 +1101,7 @@
+@@ -1043,7 +1103,7 @@
      defer state.deinit(alloc);
  
      // Initial update
@@ -719,7 +728,7 @@
      try testing.expectEqual(0, state.cursor.active.x);
      try testing.expectEqual(0, state.cursor.active.y);
      try testing.expectEqual(0, state.cursor.viewport.?.x);
-@@ -1053,14 +1111,14 @@
+@@ -1053,14 +1113,14 @@
  
      // Set a style on the cursor
      try s.nextSlice("\x1b[1m"); // Bold
@@ -736,7 +745,7 @@
      try testing.expectEqual(2, state.cursor.active.x);
      try testing.expectEqual(1, state.cursor.active.y);
      try testing.expectEqual(2, state.cursor.viewport.?.x);
-@@ -1085,7 +1143,7 @@
+@@ -1085,7 +1145,7 @@
      defer state.deinit(alloc);
  
      // Initial update
@@ -745,7 +754,7 @@
      try testing.expectEqual(0, state.cursor.active.x);
      try testing.expectEqual(1, state.cursor.active.y);
      try testing.expectEqual(0, state.cursor.viewport.?.x);
-@@ -1093,12 +1151,64 @@
+@@ -1093,12 +1153,64 @@
  
      // Scroll the viewport
      t.scrollViewport(.top);
@@ -811,7 +820,7 @@
  }
  
  test "dirty state" {
-@@ -1118,7 +1228,7 @@
+@@ -1118,7 +1230,7 @@
      defer state.deinit(alloc);
  
      // First update should trigger redraw due to resize
@@ -820,7 +829,7 @@
      try testing.expectEqual(.full, state.dirty);
  
      // Reset dirty flag and dirty rows
-@@ -1130,7 +1240,7 @@
+@@ -1130,7 +1242,7 @@
      }
  
      // Second update with no changes - no dirty rows
@@ -829,7 +838,7 @@
      try testing.expectEqual(.false, state.dirty);
      {
          const row_data = state.row_data.slice();
-@@ -1140,7 +1250,7 @@
+@@ -1140,7 +1252,7 @@
  
      // Write to first line
      try s.nextSlice("A");
@@ -838,7 +847,7 @@
      try testing.expectEqual(.partial, state.dirty);
      {
          const row_data = state.row_data.slice();
-@@ -1167,11 +1277,11 @@
+@@ -1167,11 +1279,11 @@
      defer state.deinit(alloc);
  
      // Default colors
@@ -852,7 +861,7 @@
  
      const c = state.colors.cursor.?;
      try testing.expectEqual(0xFF, c.r);
-@@ -1180,7 +1290,7 @@
+@@ -1180,7 +1292,7 @@
  
      // Change palette color 0 to White
      try s.nextSlice("\x1b]4;0;#FFFFFF\x07");
@@ -861,7 +870,7 @@
      const p0 = state.colors.palette[0];
      try testing.expectEqual(0xFF, p0.r);
      try testing.expectEqual(0xFF, p0.g);
-@@ -1206,7 +1316,7 @@
+@@ -1206,7 +1318,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -870,7 +879,7 @@
  
      const row_data = state.row_data.slice();
      const sels = row_data.items(.selection);
-@@ -1216,7 +1326,7 @@
+@@ -1216,7 +1328,7 @@
  
      // Clear the selection
      try screen.select(null);
@@ -879,7 +888,7 @@
      try testing.expectEqual(null, sels[0]);
      try testing.expectEqual(null, sels[1]);
      try testing.expectEqual(null, sels[2]);
-@@ -1241,7 +1351,7 @@
+@@ -1241,7 +1353,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -888,7 +897,7 @@
  
      const row_data = state.row_data.slice();
      const sels = row_data.items(.selection);
-@@ -1276,7 +1386,7 @@
+@@ -1276,7 +1388,7 @@
  
      // Create a hyperlink
      try s.nextSlice("\x1b]8;;http://example.com\x1b\\LINK\x1b]8;;\x1b\\");
@@ -897,7 +906,7 @@
  
      // Query link at 0,0
      var cells = try state.linkCells(alloc, .{ .x = 0, .y = 0 });
-@@ -1310,7 +1420,7 @@
+@@ -1310,7 +1422,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -906,7 +915,7 @@
  
      var w = std.Io.Writer.Allocating.init(alloc);
      defer w.deinit();
-@@ -1354,7 +1464,7 @@
+@@ -1354,7 +1466,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -915,7 +924,7 @@
  
      const expected_viewport_y: usize = viewport_rows - tail_rows;
      // BUG: This crashes without the fix
-@@ -1381,7 +1491,7 @@
+@@ -1381,7 +1493,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -924,7 +933,7 @@
  
      // Row out of bound
      {
-@@ -1420,7 +1530,7 @@
+@@ -1420,7 +1532,7 @@
  
      var state: RenderState = .empty;
      defer state.deinit(alloc);
@@ -933,7 +942,7 @@
  
      // Reset dirty state
      state.dirty = .false;
-@@ -1453,7 +1563,7 @@
+@@ -1453,7 +1565,7 @@
      // Write to row 0 to make it dirty
      try s.nextSlice("\x1b[H"); // Move to home
      try s.nextSlice("X");
