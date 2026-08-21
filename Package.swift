@@ -20,10 +20,15 @@ import PackageDescription
 // build must pass it explicitly. That is the trade for the smaller download —
 // if it becomes a nuisance, going back to one universal asset is a two-line
 // change here.
+// THE TWO ARCHS ARE ON DIFFERENT RELEASES RIGHT NOW. arm64 is boite-mirror.1.6.0
+// (the alternate-screen row-iterator fix in 0009); x86_64 is still 1.5.0, because
+// that slice has not been rebuilt yet. Deliberate: pointing x86_64 at a release
+// that carries no x86_64 asset would 404 the Intel build, where today it merely
+// links the older engine. Rebuild it and bring the two lines back together.
 let libghosttyArch = ProcessInfo.processInfo.environment["LIBGHOSTTY_ARCH"] ?? "arm64"
 let libghosttyBinary: (url: String, checksum: String) = libghosttyArch == "x86_64"
     ? ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.5.0/GhosttyKit-x86_64.xcframework.zip", "48d7c9979a017a839c82db0ce75f5b08c559ad44bad9aa6849b5973b457a3e10")
-    : ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.5.0/GhosttyKit-arm64.xcframework.zip", "db198eca697aa5519dc3b61eea9eef7e0d72af2b410fcb609e46e774b7fb13f7")
+    : ("https://github.com/XMLHexagram/libghostty-spm/releases/download/boite-mirror.1.6.0/GhosttyKit-arm64.xcframework.zip", "d921184629199b5197405dae1d82a7f95a4df2e14ffe516dfe5e689b028caaea")
 
 let package = Package(
     name: "GhosttyKit",
