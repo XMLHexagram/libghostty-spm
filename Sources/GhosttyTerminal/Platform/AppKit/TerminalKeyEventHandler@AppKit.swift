@@ -87,7 +87,9 @@
                     "keyDown sending pieces=\(collected.count)"
                         + " bytes=\(collected.joined().utf8.count)"
                 )
-                var input = event.buildKeyInput(action: action)
+                var input = event.buildKeyInput(
+                    action: action, translationMods: forComposition.modifierFlags
+                )
                 for text in collected {
                     text.withCString { ptr in
                         input.text = ptr
@@ -104,7 +106,10 @@
             // forward it to ghostty as a real terminal input.
             if hadMarkedText { return }
 
-            sendKeyEvent(for: event, action: action, to: surface, includeText: true)
+            sendKeyEvent(
+                for: event, action: action, to: surface, includeText: true,
+                translationMods: forComposition.modifierFlags
+            )
         }
 
         func handleTextCommand(_ selector: Selector) {
@@ -199,15 +204,19 @@
             for event: NSEvent,
             action: ghostty_input_action_e,
             to surface: TerminalSurface,
-            includeText: Bool
+            includeText: Bool,
+            translationMods: NSEvent.ModifierFlags? = nil
         ) {
-            var input = event.buildKeyInput(action: action)
+            var input = event.buildKeyInput(action: action, translationMods: translationMods)
             // Only include text for printable characters (>= 0x20).
             // Control characters (e.g. \u{19} for Shift+Tab) must NOT be sent
             // as text — ghostty needs to translate the keycode+mods itself
             // (e.g. Tab+Shift → ESC[Z).
+            // **The characters composition would produce**, which is not what
+            // the held modifiers produce once Option has been taken out of the
+            // translation: `s`, not `ß`.
             guard includeText,
-                  let chars = event.filteredCharacters,
+                  let chars = event.filteredCharacters(applying: translationMods),
                   !chars.isEmpty,
                   let firstByte = chars.utf8.first, firstByte >= 0x20
             else {
@@ -252,7 +261,12 @@
     // MARK: - NSEvent Terminal Input Helpers
 
     extension NSEvent {
-        func buildKeyInput(action: ghostty_input_action_e) -> ghostty_input_key_s {
+        /// - Parameter translationMods: the modifiers COMPOSITION ran with, when
+        ///   they differ from the ones held. See `consumed_mods` below.
+        func buildKeyInput(
+            action: ghostty_input_action_e,
+            translationMods: NSEvent.ModifierFlags? = nil
+        ) -> ghostty_input_key_s {
             var input = ghostty_input_key_s()
             input.action = action
             // Use raw AppKit keyCode directly — the Ghostty C API expects
@@ -264,14 +278,23 @@
             let mods = TerminalInputModifiers(from: modifierFlags)
             input.mods = mods.ghosttyMods
 
-            // Consumed modifiers: modifiers the key binding system should
-            // treat as already handled by text generation. We pass through
-            // all modifiers except control and command, which should remain
-            // available for keybind matching.
-            var consumedFlags = modifierFlags
-            consumedFlags.remove(.control)
-            consumedFlags.remove(.command)
-            input.consumed_mods = TerminalInputModifiers(from: consumedFlags).ghosttyMods
+            // **Consumed modifiers: the ones TEXT GENERATION used up**, so the
+            // core knows which are left to encode with. macOS offers no way to
+            // ask, so the heuristic is the reference implementation's: control
+            // and command never contribute to text, assume everything else did.
+            //
+            // "Everything else" is measured against the modifiers COMPOSITION
+            // RAN WITH, not the ones held. They are the same key press until
+            // `macos-option-as-alt` takes Option out of the translation — and
+            // then they are the whole difference between the two behaviours.
+            // Reading the held modifiers here reported Option as consumed even
+            // when composition had been told to ignore it, so the core saw
+            // "text `s`, and the Option is already accounted for" and sent a
+            // bare `s`. Option as Alt did strip the character; nothing encoded
+            // the Alt, which is why ⌥s stopped typing `ß` and never became
+            // `ESC s`.
+            let consumed = (translationMods ?? modifierFlags).subtracting([.control, .command])
+            input.consumed_mods = TerminalInputModifiers(from: consumed).ghosttyMods
 
             if type == .keyDown || type == .keyUp,
                let chars = characters(byApplyingModifiers: []),
@@ -283,7 +306,13 @@
             return input
         }
 
-        var filteredCharacters: String? {
+        var filteredCharacters: String? { filteredCharacters(applying: nil) }
+
+        /// - Parameter mods: the modifiers to read the characters under, when
+        ///   they are not the ones held. Composition may have been told to
+        ///   ignore Option — this is the same text it was told to produce.
+        func filteredCharacters(applying mods: NSEvent.ModifierFlags?) -> String? {
+            let characters = mods.map { characters(byApplyingModifiers: $0) ?? "" } ?? characters
             guard let characters else { return nil }
             guard characters.count == 1,
                   let scalar = characters.unicodeScalars.first
