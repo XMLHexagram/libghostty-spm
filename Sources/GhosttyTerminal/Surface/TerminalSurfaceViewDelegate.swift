@@ -47,7 +47,23 @@ public protocol TerminalSurfacePwdDelegate: TerminalSurfaceViewDelegate {
 
 @MainActor
 public protocol TerminalSurfaceSearchDelegate: TerminalSurfaceViewDelegate {
-    func terminalDidRequestSearch()
+    /// The terminal is asking the host to put its search UI up.
+    ///
+    /// **`needle` is what to put in it.** Empty for the `start_search` binding,
+    /// which opens the UI and nothing else; the current selection for
+    /// `search_selection`, which is how "use the selection for find" works —
+    /// the engine hands the text over and expects the host to run the search
+    /// with it. Dropping the needle made that binding open an empty field over
+    /// a terminal that was not searching for anything.
+    func terminalDidRequestSearch(needle: String)
+    /// The terminal has torn its search down, and the host should take its
+    /// search UI away.
+    ///
+    /// Fired by the `end_search` binding — including the one the HOST sends, so
+    /// a host that closes its own UI here must be idempotent about it. Ghostty
+    /// sends it "so that GUIs can clean up stale stuff", which is the only
+    /// signal that a search ended without the host being the one to end it.
+    func terminalDidEndSearch()
     func terminalDidUpdateSearchTotal(_ total: Int)
     func terminalDidUpdateSearchSelected(_ selected: Int)
 }
