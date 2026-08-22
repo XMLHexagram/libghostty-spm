@@ -54,13 +54,25 @@
             // Ghostty's own macOS app makes at the same point — so the text
             // comes out `s`, while the key event still carries Option and the
             // core encodes it as `ESC s`.
-            view.interpretKeyEvents([translationEvent(for: event, surface: surface)])
+            let forComposition = translationEvent(for: event, surface: surface)
+            TerminalDebugLog.log(
+                .input,
+                "keyDown code=\(event.keyCode)"
+                    + " mods=\(Self.describe(event.modifierFlags))"
+                    + " translateWith=\(Self.describe(forComposition.modifierFlags))"
+                    + " chars=\(event.characters ?? "")"
+                    + " toCompose=\(forComposition.characters ?? "")"
+            )
+            view.interpretKeyEvents([forComposition])
 
             if inputMethodHandler?.consumeHandledTextCommand() == true {
                 return
             }
 
             if let collected = inputMethodHandler?.finishCollectingText() {
+                TerminalDebugLog.log(
+                    .input, "keyDown sending text=\(collected.joined(separator: "|"))"
+                )
                 var input = event.buildKeyInput(action: action)
                 for text in collected {
                     text.withCString { ptr in
@@ -83,6 +95,16 @@
 
         func handleTextCommand(_ selector: Selector) {
             inputMethodHandler?.handleCommand(selector)
+        }
+
+        /// Modifier flags as four letters, for the log.
+        private static func describe(_ flags: NSEvent.ModifierFlags) -> String {
+            var out = ""
+            if flags.contains(.shift) { out += "S" }
+            if flags.contains(.control) { out += "C" }
+            if flags.contains(.option) { out += "O" }
+            if flags.contains(.command) { out += "M" }
+            return out.isEmpty ? "-" : out
         }
 
         /// The event to run composition on: `event` with any modifier the
