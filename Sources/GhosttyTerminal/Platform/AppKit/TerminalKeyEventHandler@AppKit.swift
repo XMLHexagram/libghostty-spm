@@ -55,13 +55,18 @@
             // comes out `s`, while the key event still carries Option and the
             // core encodes it as `ESC s`.
             let forComposition = translationEvent(for: event, surface: surface)
+            // **Shape, not content.** The host writes these into a log a user
+            // can send us, so a line may say which key and which modifiers —
+            // and never what was typed. `sameText` is the diagnostic that
+            // matters anyway: when composition ran with Option taken out, the
+            // text it produces DIFFERS from what the key would otherwise have
+            // typed, and that difference is the whole mechanism.
             TerminalDebugLog.log(
                 .input,
                 "keyDown code=\(event.keyCode)"
                     + " mods=\(Self.describe(event.modifierFlags))"
                     + " translateWith=\(Self.describe(forComposition.modifierFlags))"
-                    + " chars=\(event.characters ?? "")"
-                    + " toCompose=\(forComposition.characters ?? "")"
+                    + " sameText=\(event.characters == forComposition.characters)"
             )
             view.interpretKeyEvents([forComposition])
 
@@ -71,7 +76,9 @@
 
             if let collected = inputMethodHandler?.finishCollectingText() {
                 TerminalDebugLog.log(
-                    .input, "keyDown sending text=\(collected.joined(separator: "|"))"
+                    .input,
+                    "keyDown sending pieces=\(collected.count)"
+                        + " bytes=\(collected.joined().utf8.count)"
                 )
                 var input = event.buildKeyInput(action: action)
                 for text in collected {
