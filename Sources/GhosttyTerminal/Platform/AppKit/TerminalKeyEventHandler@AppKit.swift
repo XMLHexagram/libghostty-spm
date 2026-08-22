@@ -42,7 +42,19 @@
             let hadMarkedText = inputMethodHandler?.hasMarkedText == true
 
             inputMethodHandler?.startCollectingText()
-            view.interpretKeyEvents([event])
+            // **Composition runs on the mods the ENGINE says to translate
+            // with**, which is not always the ones the user is holding.
+            //
+            // `macos-option-as-alt` lives on this line and nowhere else. macOS
+            // composes ⌥s into `ß` inside `interpretKeyEvents`, before the
+            // engine sees anything, so a config that says "Option is Alt" had
+            // no effect at all: what arrived was a character, and a character
+            // cannot be a modifier. Asking `ghostty_surface_key_translation_mods`
+            // strips Option from the set used for composition — the same call
+            // Ghostty's own macOS app makes at the same point — so the text
+            // comes out `s`, while the key event still carries Option and the
+            // core encodes it as `ESC s`.
+            view.interpretKeyEvents([translationEvent(for: event, surface: surface)])
 
             if inputMethodHandler?.consumeHandledTextCommand() == true {
                 return
@@ -71,6 +83,47 @@
 
         func handleTextCommand(_ selector: Selector) {
             inputMethodHandler?.handleCommand(selector)
+        }
+
+        /// The event to run composition on: `event` with any modifier the
+        /// engine excludes from translation taken off.
+        ///
+        /// **Reuses the original event when nothing changes**, deliberately.
+        /// AppKit's input method appears to hold identity somewhere — Ghostty's
+        /// own comment says Korean input breaks without this — so a rebuilt
+        /// event is only ever used when it has to be.
+        private func translationEvent(for event: NSEvent, surface: TerminalSurface) -> NSEvent {
+            guard let raw = surface.rawValue else { return event }
+            let wanted = TerminalInputModifiers(
+                rawValue: ghostty_surface_key_translation_mods(
+                    raw, TerminalInputModifiers(from: event.modifierFlags).ghosttyMods
+                ).rawValue
+            )
+            // The event carries hidden bits that some dead keys depend on, so
+            // the flags are edited rather than rebuilt from scratch — again as
+            // the reference implementation does.
+            var mods = event.modifierFlags
+            for (flag, mod) in [
+                (NSEvent.ModifierFlags.shift, TerminalInputModifiers.shift),
+                (.control, .ctrl),
+                (.option, .alt),
+                (.command, .super_),
+            ] {
+                if wanted.contains(mod) { mods.insert(flag) } else { mods.remove(flag) }
+            }
+            guard mods != event.modifierFlags else { return event }
+            return NSEvent.keyEvent(
+                with: event.type,
+                location: event.locationInWindow,
+                modifierFlags: mods,
+                timestamp: event.timestamp,
+                windowNumber: event.windowNumber,
+                context: nil,
+                characters: event.characters(byApplyingModifiers: mods) ?? "",
+                charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
+                isARepeat: event.isARepeat,
+                keyCode: event.keyCode
+            ) ?? event
         }
 
         func handleKeyUp(with event: NSEvent) {
