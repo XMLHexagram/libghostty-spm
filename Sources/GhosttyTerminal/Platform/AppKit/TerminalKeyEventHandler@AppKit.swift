@@ -20,6 +20,13 @@
         }
 
         func handleKeyDown(with event: NSEvent) {
+            // First statement, before every guard: "nothing in the log" then
+            // means the key never arrived here, which is a different bug from
+            // anything that happens below.
+            TerminalDebugLog.log(
+                .input,
+                "keyDown enter code=\(event.keyCode) mods=\(Self.describe(event.modifierFlags))"
+            )
             guard let view, let surface = view.surface else { return }
 
             if handleDirectInputIfNeeded(event) {
