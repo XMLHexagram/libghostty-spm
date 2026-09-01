@@ -162,6 +162,21 @@ public final class TerminalSurface {
         ghostty_surface_set_content_scale(s, x, y)
     }
 
+    /// Which display this surface is on.
+    ///
+    /// ghostty's own renderer times itself against a display, and it learns
+    /// which one only from here — nothing about the surface tells it. A window
+    /// dragged to another screen keeps being driven by the one it left until
+    /// this is called.
+    func setDisplayID(_ displayID: UInt32) {
+        guard let s = surface else {
+            TerminalDebugLog.log(.metrics, "surface displayID ignored: missing surface")
+            return
+        }
+        TerminalDebugLog.log(.metrics, "surface displayID=\(displayID)")
+        ghostty_surface_set_display_id(s, displayID)
+    }
+
     // MARK: - State
 
     func setFocus(_ focused: Bool) {

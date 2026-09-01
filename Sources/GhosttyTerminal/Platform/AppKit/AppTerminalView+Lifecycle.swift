@@ -64,7 +64,8 @@
                 // surface and create a fresh one, losing scrollback,
                 // cursor, and any in-progress command. Only build the
                 // surface on first attachment.
-                if core.surface == nil {
+                let survivingSurface = core.surface != nil
+                if !survivingSurface {
                     core.rebuildIfReady()
                 }
                 updateColorScheme()
@@ -72,6 +73,19 @@
                 // A freshly-built surface defaults to ghostty's own focus state;
                 // reconcile so a non-focused pane doesn't come up blinking.
                 reconcileCursorFocus()
+                if survivingSurface {
+                    // A rebuild already synchronized; a SURVIVOR did not, and
+                    // nothing else will. Re-attaching into the same slot is the
+                    // same size in points, so `setFrameSize` doesn't fire and
+                    // `layout()` is never marked — the one moment a pane can
+                    // return to a window on a different display than the one it
+                    // left (a boite switched away from, a screen not showing,
+                    // the drop-down summoned onto another monitor) is also the
+                    // one moment nothing asks about the scale.
+                    updateMetalLayerMetrics()
+                    core.synchronizeMetrics()
+                }
+                pushDisplayID()
 
                 NotificationCenter.default.addObserver(
                     self,
@@ -83,6 +97,12 @@
                     self,
                     selector: #selector(windowDidResignKey),
                     name: NSWindow.didResignKeyNotification,
+                    object: window
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(windowDidChangeScreen),
+                    name: NSWindow.didChangeScreenNotification,
                     object: window
                 )
             } else {
@@ -144,6 +164,34 @@
             reconcileCursorFocus()
         }
 
+        /// The window moved to another display.
+        ///
+        /// AppKit does send `viewDidChangeBackingProperties` for this, but not
+        /// dependably *after* the window has adopted the new screen's
+        /// `backingScaleFactor` — so the scale read there can still be the
+        /// display we left, and unlike a resize nothing comes along later to
+        /// correct it: a move changes no point-sized frame, so `setFrameSize`
+        /// never fires and `layout()` is never marked. The surface goes on
+        /// rendering at the old DPI until the window is resized by hand.
+        ///
+        /// Upstream ghostty hits the same thing and answers it the same way
+        /// (ghostty-org/ghostty#2731): re-run the backing-properties path one
+        /// hop through the main queue, by which time the value is right.
+        @objc internal func windowDidChangeScreen(_ notification: Notification) {
+            guard let window, (notification.object as? NSWindow) === window else { return }
+            pushDisplayID()
+            DispatchQueue.main.async { [weak self] in
+                self?.viewDidChangeBackingProperties()
+            }
+        }
+
+        /// Tell ghostty which display it is drawing on, so its renderer times
+        /// itself against that one's refresh rate. Nothing else carries this.
+        internal func pushDisplayID() {
+            guard let displayID = window?.screen?.terminalDisplayID else { return }
+            core.surface?.setDisplayID(displayID)
+        }
+
         override func setFrameSize(_ newSize: NSSize) {
             super.setFrameSize(newSize)
             core.synchronizeMetrics()
@@ -162,15 +210,26 @@
         internal func updateMetalLayerMetrics() {
             guard bounds.width > 0, bounds.height > 0 else { return }
             let scale = core.scaleFactor()
+            // Without the transaction Core Animation animates the change, and
+            // on a cross-display move that is a visible scale-up-then-settle of
+            // the whole terminal rather than a swap. Upstream ghostty disables
+            // it here for the same reason.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             metalLayer?.contentsScale = scale
             metalLayer?.drawableSize = CGSize(
                 width: bounds.width * scale,
                 height: bounds.height * scale
             )
+            CATransaction.commit()
         }
 
         internal func enforceMetalLayerScale() {
             guard let metalLayer else { return }
+            // Runs after every frame, so it is also where a backing scale that
+            // changed without anybody telling us converges — see
+            // `resynchronizeIfScaleDrifted`.
+            core.resynchronizeIfScaleDrifted()
             let scale = core.scaleFactor()
             if metalLayer.contentsScale != scale {
                 metalLayer.contentsScale = scale
@@ -189,6 +248,15 @@
             }
             surface?.setColorScheme(scheme.ghosttyValue)
             controller?.setColorScheme(scheme)
+        }
+    }
+
+    extension NSScreen {
+        /// The `CGDirectDisplayID` behind this screen. AppKit only publishes it
+        /// through the device description, under a key it does not name.
+        var terminalDisplayID: UInt32? {
+            let key = NSDeviceDescriptionKey("NSScreenNumber")
+            return (deviceDescription[key] as? NSNumber)?.uint32Value
         }
     }
 #endif

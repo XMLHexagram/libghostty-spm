@@ -237,6 +237,31 @@ final class TerminalSurfaceCoordinator {
         onMetricsUpdate?()
     }
 
+    /// Safety net, run after every frame (`onPostRender`).
+    ///
+    /// Every route that changes the backing scale is supposed to end in
+    /// `synchronizeMetrics`, and each of them is a notification that has to
+    /// arrive, in a view that has to be in a window to hear it. A pane that was
+    /// detached while the window changed display hears none of them, and a move
+    /// between screens — unlike a resize — changes no POINT-sized frame, so
+    /// nothing downstream marks layout and asks again. The surface then keeps
+    /// rendering for the display it left.
+    ///
+    /// So rather than trust the notifications to be complete, compare what we
+    /// last told the surface against what the view is actually on, once a frame.
+    /// A `Double` compare per surface per frame buys convergence from every
+    /// route, including the ones nobody has found yet.
+    func resynchronizeIfScaleDrifted() {
+        guard let lastMetrics else { return }
+        let scale = scaleFactor()
+        guard abs(lastMetrics.scale - scale) > 0.0001 else { return }
+        TerminalDebugLog.log(
+            .metrics,
+            "scale drift \(String(format: "%.2f", lastMetrics.scale)) -> \(String(format: "%.2f", scale)); resyncing"
+        )
+        synchronizeMetrics()
+    }
+
     func fitToSize() {
         synchronizeMetrics()
     }
