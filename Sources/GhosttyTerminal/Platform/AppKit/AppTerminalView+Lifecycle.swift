@@ -82,7 +82,7 @@
                     // left (a boite switched away from, a screen not showing,
                     // the drop-down summoned onto another monitor) is also the
                     // one moment nothing asks about the scale.
-                    updateMetalLayerMetrics()
+                    updateLayerMetrics()
                     core.synchronizeMetrics()
                 }
                 pushDisplayID()
@@ -199,7 +199,7 @@
 
         override func viewDidChangeBackingProperties() {
             super.viewDidChangeBackingProperties()
-            updateMetalLayerMetrics()
+            updateLayerMetrics()
             core.synchronizeMetrics()
         }
 
@@ -207,33 +207,68 @@
             core.fitToSize()
         }
 
-        internal func updateMetalLayerMetrics() {
-            guard bounds.width > 0, bounds.height > 0 else { return }
-            let scale = core.scaleFactor()
-            // Without the transaction Core Animation animates the change, and
-            // on a cross-display move that is a visible scale-up-then-settle of
-            // the whole terminal rather than a swap. Upstream ghostty disables
-            // it here for the same reason.
+        /// The layer ghostty actually presents into — **not** the one
+        /// `commonInit` made.
+        ///
+        /// MEASURED, and the reason a display change survived every fix aimed
+        /// at it. `commonInit` builds a `CAMetalLayer` and assigns it, but
+        /// ghostty does not render into a `CAMetalLayer` at all: it draws into
+        /// an `IOSurface` and hands it to a `CALayer` subclass of its own. On
+        /// macOS it installs that layer by making this view **layer-hosting** —
+        /// `renderer/Metal.zig` does `view.setProperty("layer", ioSurfaceLayer)`
+        /// and then `wantsLayer = true` — so the moment a surface exists, the
+        /// layer we made is an orphan holding no pixels, and everything written
+        /// to it is a no-op on screen.
+        ///
+        /// Read `layer` fresh every time. A surface rebuild
+        /// (`releaseSurfaceForHiding` → `resumeRendering`) installs a NEW one,
+        /// so this can never be cached — caching it is the original bug.
+        internal var presentedLayer: CALayer? { layer }
+
+        /// `contentsScale` on the presented layer is not a hint. On macOS it is
+        /// the ONLY thing that tells ghostty how many pixels to render.
+        ///
+        /// `renderer/Metal.zig`'s `surfaceSize()` returns
+        /// `layer.bounds × layer.contentsScale`, and `generic.zig` re-reads it
+        /// at the top of EVERY frame, overwriting its own `size.screen` with
+        /// the answer. `ghostty_surface_set_size` only ever reaches the terminal
+        /// side (grid, PTY, reflow); the renderer's pixel count comes from here.
+        ///
+        /// And nothing else will set it. AppKit maintains `contentsScale` for
+        /// layer-BACKED views; this one is layer-HOSTING, and for those the
+        /// embedder owns it. So a window moved to a display with a different
+        /// backing scale renders at the scale its surface was born with until
+        /// this runs — magnified by the compositor and, because ghostty's layer
+        /// draws `contentsGravity = topLeft`, pinned into the corner rather
+        /// than stretched.
+        ///
+        /// The transaction is not decoration: without it Core Animation
+        /// animates the change, turning a cross-display move into a visible
+        /// scale-up-and-settle of the whole terminal. Upstream ghostty disables
+        /// it here for the same reason.
+        private func applyContentsScale(_ scale: CGFloat) {
+            guard let presentedLayer, presentedLayer.contentsScale != scale else { return }
+            TerminalDebugLog.log(
+                .metrics,
+                "layer contentsScale \(String(format: "%.2f", presentedLayer.contentsScale)) -> \(String(format: "%.2f", scale)) on \(type(of: presentedLayer))"
+            )
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            metalLayer?.contentsScale = scale
-            metalLayer?.drawableSize = CGSize(
-                width: bounds.width * scale,
-                height: bounds.height * scale
-            )
+            presentedLayer.contentsScale = scale
             CATransaction.commit()
         }
 
-        internal func enforceMetalLayerScale() {
-            guard let metalLayer else { return }
-            // Runs after every frame, so it is also where a backing scale that
-            // changed without anybody telling us converges — see
-            // `resynchronizeIfScaleDrifted`.
+        /// `core.onMetricsUpdate` — the surface has just been told a new size.
+        internal func updateLayerMetrics() {
+            applyContentsScale(core.scaleFactor())
+        }
+
+        /// `core.onPostRender` — runs after every frame, which makes it the
+        /// place a backing scale that changed without anybody telling us
+        /// converges. See `resynchronizeIfScaleDrifted`.
+        internal func enforcePresentedLayerScale() {
             core.resynchronizeIfScaleDrifted()
-            let scale = core.scaleFactor()
-            if metalLayer.contentsScale != scale {
-                metalLayer.contentsScale = scale
-            }
+            applyContentsScale(core.scaleFactor())
         }
 
         override func viewDidChangeEffectiveAppearance() {

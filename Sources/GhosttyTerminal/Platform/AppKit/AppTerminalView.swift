@@ -12,7 +12,6 @@
     @MainActor
     public final class AppTerminalView: NSView {
         let core = TerminalSurfaceCoordinator()
-        var metalLayer: CAMetalLayer?
         var inputHandler: TerminalKeyEventHandler?
 
         public weak var delegate: (any TerminalSurfaceViewDelegate)? {
@@ -218,8 +217,12 @@
             metal.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
             metal.isOpaque = false
             metal.backgroundColor = NSColor.clear.cgColor
+            // Placeholder only. It is the view's layer until the first surface
+            // exists, and ghostty replaces it the moment one does — see
+            // `presentedLayer`. Deliberately not kept in a property: a stored
+            // reference to it read like the layer on screen, and every geometry
+            // fix aimed at that reference was a no-op.
             layer = metal
-            metalLayer = metal
             layer?.backgroundColor = NSColor.clear.cgColor
 
             inputHandler = TerminalKeyEventHandler(view: self)
@@ -248,10 +251,10 @@
                 )
             }
             core.onMetricsUpdate = { [weak self] in
-                self?.updateMetalLayerMetrics()
+                self?.updateLayerMetrics()
             }
             core.onPostRender = { [weak self] in
-                self?.enforceMetalLayerScale()
+                self?.enforcePresentedLayerScale()
             }
             core.onFrameStats = { [weak self] stats in
                 self?.onFrameStats?(stats)
@@ -271,13 +274,13 @@
             // bounds reflects the final size.
             let size = bounds.size
             guard size.width > 0, size.height > 0 else { return }
-            if let metalLayer {
-                let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-                metalLayer.drawableSize = CGSize(
-                    width: size.width * scale,
-                    height: size.height * scale
-                )
-            }
+            // Layout changes bounds, never the backing scale, so there is
+            // nothing to do to the layer here — and `synchronizeMetrics` runs
+            // `updateLayerMetrics` through `onMetricsUpdate` anyway. This used
+            // to hand-write `drawableSize` on a layer ghostty had already
+            // replaced: a line that did nothing, and whose looking-busy hid
+            // that the layer which DOES matter was never told anything. See
+            // `presentedLayer`.
             core.synchronizeMetrics()
         }
 
